@@ -24,6 +24,8 @@ def get_engine() -> AsyncEngine:
         connect_args: dict = {}
         if "sqlite" in settings.DATABASE_URL:
             connect_args = {"check_same_thread": False}
+        elif "asyncpg" in settings.DATABASE_URL:
+            connect_args = {"statement_cache_size": 0}
 
         _engine = create_async_engine(
             settings.DATABASE_URL,

@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # ── Database ────────────────────────────────────────────────────────────
     DATABASE_URL: str = "sqlite+aiosqlite:///./velora.db"
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def fix_database_url(cls, v: str) -> str:
+        if isinstance(v, str) and v.startswith("postgresql://"):
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
     # ── Redis ───────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
@@ -57,7 +64,7 @@ class Settings(BaseSettings):
     LOG_BACKUP_COUNT: int = 10
 
     # ── CORS ────────────────────────────────────────────────────────────────
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:80"]
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:80"
 
     # ── Rate Limiting ────────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -66,12 +73,13 @@ class Settings(BaseSettings):
     FIRST_ADMIN_EMAIL: EmailStr = "admin@velora.com"  # type: ignore[assignment]
     FIRST_ADMIN_PASSWORD: str = "ChangeMe!Strong1"
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
-    @classmethod
-    def parse_origins(cls, v: str | list[str]) -> list[str]:
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    @property
+    def cors_origins(self) -> list[str]:
+        v = self.ALLOWED_ORIGINS.strip()
+        if v.startswith("["):
+            import json
+            return json.loads(v)
+        return [o.strip() for o in v.split(",") if o.strip()]
 
     @field_validator("BROWSER_PROFILE_DIR", "SCREENSHOT_DIR", "LOG_DIR", mode="after")
     @classmethod
