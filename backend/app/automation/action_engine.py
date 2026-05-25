@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import random
+from typing import Any
+
+import httpx
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+
+from app.automation.browser_manager import BrowserManager
+from app.core.config import settings
+from app.core.logging import get_logger
+from app.models.action_rule import ActionRule, ActionType
+
+logger = get_logger(__name__)
+
+
+class ActionEngine:
+    """
+    Executes configured action rules against a live browser page.
+    Implements retry, timeout, fallback selectors, and human-like delays.
+    """
+
+    def __init__(self, job_id: str, browser: BrowserManager) -> None:
+        self.job_id = job_id
+        self._browser = browser
+
+    async def execute_rule(self, rule: ActionRule) -> bool:
+        """Execute a single action rule with full retry and fallback logic."""
+        attempts = 0
+        last_error: Exception | None = None
+
+        while attempts < rule.retry_count:
+            attempts += 1
+            try:
+                success = await self._dispatch(rule)
+                if success:
+                    logger.info(
+                        "Action executed",
+                        job_id=self.job_id,
+                        rule=rule.name,
+                        action=rule.action_type,
+                        attempt=attempts,
+                    )
+                    await asyncio.sleep(rule.delay_after_ms / 1000)
+                    return True
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Action attempt failed",
+                    job_id=self.job_id,
+                    rule=rule.name,
+                    attempt=attempts,
+                    error=str(exc),
+                )
+                delay = settings.ACTION_RETRY_DELAY_SECONDS * (1.5 ** (attempts - 1))
+                await asyncio.sleep(delay + random.uniform(0.1, 0.5))
+
+        logger.error(
+            "Action failed after all retries",
+            job_id=self.job_id,
+            rule=rule.name,
+            error=str(last_error),
+        )
+        return False
+
+    async def execute_chain(self, rules: list[ActionRule]) -> list[bool]:
+        """Execute a sequence of action rules in order."""
+        active_rules = sorted(
+            [r for r in rules if r.is_active], key=lambda r: r.order
+        )
+        results: list[bool] = []
+        for rule in active_rules:
+            result = await self.execute_rule(rule)
+            results.append(result)
+            if not result:
+                # Capture screenshot on action failure for diagnostics
+                await self._browser.screenshot(label=f"action_fail_{rule.name[:20]}")
+        return results
+
+    async def _dispatch(self, rule: ActionRule) -> bool:
+        handlers = {
+            ActionType.click: self._handle_click,
+            ActionType.navigate: self._handle_navigate,
+            ActionType.fill_form: self._handle_fill_form,
+            ActionType.extract_text: self._handle_extract_text,
+            ActionType.screenshot: self._handle_screenshot,
+            ActionType.wait: self._handle_wait,
+            ActionType.scroll: self._handle_scroll,
+            ActionType.webhook: self._handle_webhook,
+            ActionType.notify: self._handle_notify,
+            ActionType.mark_important: self._handle_mark_important,
+            ActionType.open_inquiry: self._handle_open_inquiry,
+            ActionType.copy_lead: self._handle_copy_lead,
+        }
+        handler = handlers.get(rule.action_type)
+        if handler is None:
+            logger.error("Unknown action type", action=rule.action_type)
+            return False
+        return await handler(rule)
+
+    async def _handle_click(self, rule: ActionRule) -> bool:
+        page = await self._browser.get_page()
+        selector = await self._resolve_selector(page, rule)
+        if not selector:
+            return False
+        await page.wait_for_selector(selector, timeout=rule.timeout_ms)
+        await asyncio.sleep(random.uniform(0.1, 0.4))
+        await page.click(selector)
+        return True
+
+    async def _handle_navigate(self, rule: ActionRule) -> bool:
+        if not rule.target_url:
+            return False
+        await self._browser.navigate(rule.target_url)
+        return True
+
+    async def _handle_fill_form(self, rule: ActionRule) -> bool:
+        if not rule.selector or not rule.payload:
+            return False
+        page = await self._browser.get_page()
+        data: dict[str, str] = json.loads(rule.payload)
+        for selector, value in data.items():
+            await page.wait_for_selector(selector, timeout=rule.timeout_ms)
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+            await page.fill(selector, value)
+            await asyncio.sleep(random.uniform(0.1, 0.3))
+        return True
+
+    async def _handle_extract_text(self, rule: ActionRule) -> bool:
+        if not rule.selector:
+            return False
+        page = await self._browser.get_page()
+        selector = await self._resolve_selector(page, rule)
+        if not selector:
+            return False
+        text = await page.inner_text(selector)
+        logger.info("Text extracted", job_id=self.job_id, text=text[:200])
+        return True
+
+    async def _handle_screenshot(self, rule: ActionRule) -> bool:
+        path = await self._browser.screenshot(label=rule.name[:20])
+        return path is not None
+
+    async def _handle_wait(self, rule: ActionRule) -> bool:
+        delay = rule.timeout_ms / 1000 if rule.timeout_ms else 2.0
+        await asyncio.sleep(delay)
+        return True
+
+    async def _handle_scroll(self, rule: ActionRule) -> bool:
+        page = await self._browser.get_page()
+        payload = json.loads(rule.payload) if rule.payload else {}
+        x = payload.get("x", 0)
+        y = payload.get("y", 500)
+        await page.evaluate(f"window.scrollBy({x}, {y})")
+        return True
+
+    async def _handle_webhook(self, rule: ActionRule) -> bool:
+        if not rule.target_url:
+            return False
+        payload = json.loads(rule.payload) if rule.payload else {}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(rule.target_url, json=payload)
+            response.raise_for_status()
+        logger.info("Webhook triggered", url=rule.target_url, status=response.status_code)
+        return True
+
+    async def _handle_notify(self, rule: ActionRule) -> bool:
+        logger.info(
+            "NOTIFICATION",
+            job_id=self.job_id,
+            rule=rule.name,
+            payload=rule.payload,
+        )
+        return True
+
+    async def _handle_mark_important(self, rule: ActionRule) -> bool:
+        return await self._handle_click(rule)
+
+    async def _handle_open_inquiry(self, rule: ActionRule) -> bool:
+        return await self._handle_click(rule)
+
+    async def _handle_copy_lead(self, rule: ActionRule) -> bool:
+        return await self._handle_extract_text(rule)
+
+    async def _resolve_selector(self, page: Page, rule: ActionRule) -> str | None:
+        """Try primary selector then fallback selector."""
+        for selector in filter(None, [rule.selector, rule.fallback_selector]):
+            try:
+                await page.wait_for_selector(selector, timeout=min(rule.timeout_ms, 5000))
+                return selector
+            except PlaywrightTimeoutError:
+                continue
+        logger.warning(
+            "No selector resolved",
+            job_id=self.job_id,
+            rule=rule.name,
+            primary=rule.selector,
+            fallback=rule.fallback_selector,
+        )
+        return None

@@ -1,0 +1,43 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Velora Auto Clicker — Docker Compose (Supabase DB, no local Postgres)
+#
+# Setup:
+#   1. cp backend/.env.example backend/.env
+#   2. Fill in SUPABASE_DB_URL and secrets in backend/.env
+#   3. docker compose up -d --build
+#   Done — migrations run automatically on startup.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    restart: unless-stopped
+    env_file: backend/.env
+    volumes:
+      - velora_data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  velora_data:

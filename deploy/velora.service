@@ -1,0 +1,33 @@
+[Unit]
+Description=Velora Auto Clicker Backend
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=velora
+Group=velora
+WorkingDirectory=/opt/velora/backend
+EnvironmentFile=/opt/velora/backend/.env
+ExecStart=/opt/velora/.venv/bin/uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 2 \
+    --loop uvloop \
+    --access-log \
+    --log-level info
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=velora-backend
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/velora /data
+
+[Install]
+WantedBy=multi-user.target

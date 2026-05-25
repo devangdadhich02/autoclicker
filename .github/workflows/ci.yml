@@ -1,0 +1,69 @@
+name: Velora CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  backend-lint-test:
+    name: Backend — Lint & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Run ruff lint
+        run: ruff check app tests
+
+      - name: Run mypy type check
+        run: mypy app --ignore-missing-imports
+
+      - name: Run pytest
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///:memory:
+          SECRET_KEY: ci-test-secret-key-not-for-production
+          APP_ENV: testing
+          FIRST_ADMIN_EMAIL: admin@test.com
+          FIRST_ADMIN_PASSWORD: TestPassword123!
+        run: pytest --tb=short -q
+
+  frontend-lint-build:
+    name: Frontend — Lint & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
