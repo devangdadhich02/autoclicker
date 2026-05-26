@@ -26,10 +26,16 @@ export default function JobDetailPage() {
   const [actSelector, setActSelector] = useState('')
   const [actSaving, setActSaving] = useState(false)
 
-  useEffect(() => { if (jobId) fetchAll() }, [jobId])
+  useEffect(() => {
+    if (jobId) {
+      fetchAll()
+      const timer = setInterval(() => fetchAll(true), 5_000)
+      return () => clearInterval(timer)
+    }
+  }, [jobId])
 
-  async function fetchAll() {
-    setLoading(true)
+  async function fetchAll(silent = false) {
+    if (!silent) setLoading(true)
     try {
       const [j, kw, act] = await Promise.all([
         api.get(`/jobs/${jobId}`),
@@ -39,8 +45,8 @@ export default function JobDetailPage() {
       setJob(j.data)
       setKeywords(kw.data)
       setActions(act.data)
-    } catch { toast.error('Failed to load job') }
-    finally { setLoading(false) }
+    } catch { if (!silent) toast.error('Failed to load job') }
+    finally { if (!silent) setLoading(false) }
   }
 
   async function addKeyword(e: React.FormEvent) {
@@ -50,7 +56,7 @@ export default function JobDetailPage() {
       await api.post(`/jobs/${jobId}/keywords`, { value: kwValue, match_type: kwType, priority: kwPriority })
       toast.success('Keyword added')
       setKwValue('')
-      fetchAll()
+      await fetchAll()
     } catch (err: any) { toast.error(err?.response?.data?.detail ?? 'Failed') }
     finally { setKwSaving(false) }
   }
@@ -58,12 +64,12 @@ export default function JobDetailPage() {
   async function deleteKeyword(kwId: string) {
     await api.delete(`/jobs/${jobId}/keywords/${kwId}`)
     toast.success('Keyword removed')
-    fetchAll()
+    await fetchAll()
   }
 
   async function toggleKeyword(kw: Keyword) {
     await api.patch(`/jobs/${jobId}/keywords/${kw.id}`, { is_active: !kw.is_active })
-    fetchAll()
+    await fetchAll()
   }
 
   async function addAction(e: React.FormEvent) {
@@ -73,7 +79,7 @@ export default function JobDetailPage() {
       await api.post(`/jobs/${jobId}/actions`, { name: actName, action_type: actType, selector: actSelector || null })
       toast.success('Action rule added')
       setActName(''); setActSelector('')
-      fetchAll()
+      await fetchAll()
     } catch (err: any) { toast.error(err?.response?.data?.detail ?? 'Failed') }
     finally { setActSaving(false) }
   }
@@ -81,7 +87,7 @@ export default function JobDetailPage() {
   async function deleteAction(ruleId: string) {
     await api.delete(`/jobs/${jobId}/actions/${ruleId}`)
     toast.success('Action removed')
-    fetchAll()
+    await fetchAll()
   }
 
   if (loading) return (

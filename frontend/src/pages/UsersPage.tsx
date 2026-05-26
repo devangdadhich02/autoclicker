@@ -16,13 +16,17 @@ export default function UsersPage() {
   const [password, setPassword] = useState('')
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => { fetchUsers() }, [])
+  useEffect(() => {
+    fetchUsers()
+    const timer = setInterval(() => fetchUsers(true), 15_000)
+    return () => clearInterval(timer)
+  }, [])
 
-  async function fetchUsers() {
-    setLoading(true)
+  async function fetchUsers(silent = false) {
+    if (!silent) setLoading(true)
     try { const { data } = await api.get('/users'); setUsers(data) }
-    catch { toast.error('Failed to load users') }
-    finally { setLoading(false) }
+    catch { if (!silent) toast.error('Failed to load users') }
+    finally { if (!silent) setLoading(false) }
   }
 
   async function createUser(e: React.FormEvent) {
@@ -32,7 +36,7 @@ export default function UsersPage() {
       await api.post('/users', { email, full_name: fullName, role, password })
       toast.success('User created')
       setEmail(''); setFullName(''); setPassword(''); setShowForm(false)
-      fetchUsers()
+      await fetchUsers(false)
     } catch (err: any) { toast.error(err?.response?.data?.detail ?? 'Failed') }
     finally { setSaving(false) }
   }
@@ -41,7 +45,7 @@ export default function UsersPage() {
     try {
       await api.patch(`/users/${user.id}`, { is_active: !user.is_active })
       toast.success(`User ${user.is_active ? 'deactivated' : 'activated'}`)
-      fetchUsers()
+      await fetchUsers()
     } catch { toast.error('Failed to update user') }
   }
 

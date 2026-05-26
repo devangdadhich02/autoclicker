@@ -82,7 +82,11 @@ export default function JobsPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({})
 
-  useEffect(() => { fetchJobs() }, [])
+  useEffect(() => {
+    fetchJobs()
+    const timer = setInterval(fetchJobs, 10_000)
+    return () => clearInterval(timer)
+  }, [])
 
   async function fetchJobs() {
     try {

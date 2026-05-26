@@ -22,17 +22,21 @@ export default function LogsPage() {
   const [filterType, setFilterType] = useState('')
   const [limit, setLimit] = useState(100)
 
-  useEffect(() => { fetchLogs() }, [filterSev, limit])
+  useEffect(() => {
+    fetchLogs()
+    const timer = setInterval(() => fetchLogs(true), 10_000)
+    return () => clearInterval(timer)
+  }, [filterSev, limit])
 
-  async function fetchLogs() {
-    setLoading(true)
+  async function fetchLogs(silent = false) {
+    if (!silent) setLoading(true)
     try {
       const params: Record<string, string | number> = { limit }
       if (filterSev) params.severity = filterSev
       if (filterType) params.event_type = filterType
       const { data } = await api.get('/logs', { params })
       setLogs(data)
-    } catch {} finally { setLoading(false) }
+    } catch {} finally { if (!silent) setLoading(false) }
   }
 
   async function exportCsv() {
@@ -53,7 +57,7 @@ export default function LogsPage() {
           <p className="text-sm text-gray-500 mt-0.5">{logs.length} entries shown</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={fetchLogs} className="btn-ghost py-1.5 px-3 text-xs"><RefreshCw size={12} /> Refresh</button>
+          <button onClick={() => fetchLogs()} className="btn-ghost py-1.5 px-3 text-xs"><RefreshCw size={12} /> Refresh</button>
           <button onClick={exportCsv} className="btn-ghost py-1.5 px-3 text-xs"><Download size={12} /> Export CSV</button>
         </div>
       </div>
