@@ -110,7 +110,7 @@ async def test_delete_action_rule(client: AsyncClient, admin_token: str) -> None
 async def test_action_rule_unauthorized(client: AsyncClient, operator_token: str) -> None:
     resp = await client.post(
         "/api/v1/jobs/nonexistent-id/actions",
-        json={"name": "X", "action_type": "click"},
+        json={"name": "TestRule", "action_type": "click"},
         headers={"Authorization": f"Bearer {operator_token}"},
     )
     assert resp.status_code in (403, 404)

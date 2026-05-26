@@ -51,6 +51,7 @@ class KeywordService:
         )
         self._db.add(kw)
         await self._db.flush()
+        await self._db.refresh(kw)
         return kw
 
     async def update(self, keyword_id: str, **fields: object) -> Keyword:
@@ -63,6 +64,7 @@ class KeywordService:
             if key in allowed:
                 setattr(kw, key, value)
         await self._db.flush()
+        await self._db.refresh(kw)
         return kw
 
     async def delete(self, keyword_id: str) -> None:

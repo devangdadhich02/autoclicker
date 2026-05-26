@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from app.automation.detection_engine import DetectionEngine
-from app.models.keyword import Keyword, MatchType
+from app.models.keyword import MatchType
 
 
 def make_keyword(
@@ -14,18 +16,18 @@ def make_keyword(
     priority: int = 5,
     score: float = 1.0,
     cooldown_seconds: int = 0,
-) -> Keyword:
-    kw = Keyword.__new__(Keyword)
-    kw.id = kw_id
-    kw.value = value
-    kw.match_type = match_type
-    kw.case_sensitive = case_sensitive
-    kw.priority = priority
-    kw.score = score
-    kw.cooldown_seconds = cooldown_seconds
-    kw.is_active = True
-    kw.match_count = 0
-    return kw
+) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        id=kw_id,
+        value=value,
+        match_type=match_type,
+        case_sensitive=case_sensitive,
+        priority=priority,
+        score=score,
+        cooldown_seconds=cooldown_seconds,
+        is_active=True,
+        match_count=0,
+    )
 
 
 def test_contains_match():

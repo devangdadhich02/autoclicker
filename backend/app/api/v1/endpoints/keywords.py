@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 
 from app.api.deps import CurrentUser, DbSession, OperatorUser
 from app.api.schemas.keyword import KeywordCreate, KeywordResponse, KeywordUpdate
@@ -66,13 +66,14 @@ async def update_keyword(
     return KeywordResponse.model_validate(kw)
 
 
-@router.delete("/{keyword_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{keyword_id}")
 async def delete_keyword(
     job_id: str, keyword_id: str, db: DbSession, current_user: OperatorUser
-) -> None:
+) -> Response:
     await _assert_job_access(job_id, current_user, db)
     svc = KeywordService(db)
     try:
         await svc.delete(keyword_id)
     except NotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

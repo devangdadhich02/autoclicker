@@ -97,8 +97,10 @@ async def test_logs_analytics_summary(
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert "total_events" in data
-    assert "by_severity" in data
+    assert "total_jobs" in data
+    assert "running_jobs" in data
+    assert "total_leads_detected" in data
+    assert "severity_breakdown" in data
 
 
 @pytest.mark.asyncio

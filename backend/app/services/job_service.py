@@ -69,6 +69,7 @@ class JobService:
         )
         self._db.add(job)
         await self._db.flush()
+        await self._db.refresh(job)
         return job
 
     async def update(self, job_id: str, current_user: User, **fields: object) -> AutomationJob:
@@ -81,6 +82,7 @@ class JobService:
             if key in allowed:
                 setattr(job, key, value)
         await self._db.flush()
+        await self._db.refresh(job)
         return job
 
     async def set_status(self, job_id: str, status: JobStatus) -> AutomationJob:

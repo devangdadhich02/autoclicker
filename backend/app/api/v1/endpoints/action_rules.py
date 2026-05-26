@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 
 from app.api.deps import CurrentUser, DbSession, OperatorUser
 from app.api.schemas.action_rule import ActionRuleCreate, ActionRuleResponse, ActionRuleUpdate
@@ -43,6 +43,7 @@ async def create_action_rule(
     rule = ActionRule(job_id=job_id, **body.model_dump())
     db.add(rule)
     await db.flush()
+    await db.refresh(rule)
     return ActionRuleResponse.model_validate(rule)
 
 
@@ -64,13 +65,14 @@ async def update_action_rule(
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(rule, key, value)
     await db.flush()
+    await db.refresh(rule)
     return ActionRuleResponse.model_validate(rule)
 
 
-@router.delete("/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{rule_id}")
 async def delete_action_rule(
     job_id: str, rule_id: str, db: DbSession, current_user: OperatorUser
-) -> None:
+) -> Response:
     await _assert_job_access(job_id, current_user, db)
     result = await db.execute(
         select(ActionRule).where(ActionRule.id == rule_id, ActionRule.job_id == job_id)
@@ -80,3 +82,4 @@ async def delete_action_rule(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ActionRule not found.")
     await db.delete(rule)
     await db.flush()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

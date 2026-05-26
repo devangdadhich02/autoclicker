@@ -3,10 +3,22 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from app.core.logging import get_logger
-from app.models.keyword import Keyword, MatchType
+from app.models.keyword import MatchType
+
+
+@runtime_checkable
+class KeywordLike(Protocol):
+    id: str
+    value: str
+    match_type: MatchType
+    case_sensitive: bool
+    priority: int
+    score: float
+    cooldown_seconds: int
+    is_active: bool
 
 logger = get_logger(__name__)
 
@@ -53,7 +65,7 @@ class DetectionEngine:
         self._cooldown = CooldownTracker()
         self._compiled_patterns: dict[str, re.Pattern[str]] = {}
 
-    def _get_pattern(self, keyword: Keyword) -> re.Pattern[str]:
+    def _get_pattern(self, keyword: Any) -> re.Pattern[str]:
         if keyword.id not in self._compiled_patterns:
             flags = 0 if keyword.case_sensitive else re.IGNORECASE
             if keyword.match_type == MatchType.regex:
@@ -71,7 +83,7 @@ class DetectionEngine:
             self._compiled_patterns[keyword.id] = pattern
         return self._compiled_patterns[keyword.id]
 
-    def evaluate(self, text: str, keywords: list[Keyword]) -> list[DetectionResult]:
+    def evaluate(self, text: str, keywords: list[Any]) -> list[DetectionResult]:
         """
         Evaluates text against all active keywords.
         Returns sorted list of DetectionResults (highest priority first).
@@ -120,7 +132,7 @@ class DetectionEngine:
         return results
 
     def evaluate_element_texts(
-        self, elements: list[dict[str, Any]], keywords: list[Keyword]
+        self, elements: list[dict[str, Any]], keywords: list[Any]
     ) -> list[tuple[dict[str, Any], list[DetectionResult]]]:
         """
         Evaluates a list of {'text': str, 'selector': str, ...} element dicts.

@@ -78,15 +78,16 @@ async def get_me(current_user: CurrentUser) -> UserResponse:
     return UserResponse.model_validate(current_user)
 
 
-@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/change-password", status_code=status.HTTP_200_OK)
 async def change_password(
     body: ChangePasswordRequest,
     current_user: CurrentUser,
     db: DbSession,
-) -> None:
+) -> dict:
     svc = UserService(db)
     try:
         await svc.authenticate(current_user.email, body.current_password)
     except AuthenticationError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password incorrect.")
     await svc.update_password(current_user.id, body.new_password)
+    return {"detail": "Password updated successfully."}

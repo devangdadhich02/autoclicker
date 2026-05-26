@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 
 from app.api.deps import CurrentUser, DbSession, OperatorUser
 from app.api.schemas.job import JobControlRequest, JobCreate, JobResponse, JobUpdate
@@ -66,8 +66,8 @@ async def update_job(
     return JobResponse.model_validate(job)
 
 
-@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_job(job_id: str, db: DbSession, current_user: OperatorUser) -> None:
+@router.delete("/{job_id}")
+async def delete_job(job_id: str, db: DbSession, current_user: OperatorUser) -> Response:
     scheduler = get_scheduler()
     if scheduler.is_running(job_id):
         await scheduler.stop_job(job_id)
@@ -77,6 +77,7 @@ async def delete_job(job_id: str, db: DbSession, current_user: OperatorUser) -> 
     except (NotFoundError, AuthorizationError) as exc:
         code = status.HTTP_404_NOT_FOUND if isinstance(exc, NotFoundError) else status.HTTP_403_FORBIDDEN
         raise HTTPException(status_code=code, detail=exc.message)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{job_id}/control", response_model=JobResponse)
