@@ -20,6 +20,7 @@ RUN pip install --upgrade pip && pip install -e ".[dev]"
 RUN playwright install chromium --with-deps
 
 COPY backend/ .
+COPY scripts/ ./scripts/
 
 RUN mkdir -p /data/browser_profiles /data/screenshots /data/logs
 
