@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 from datetime import datetime
 
 from fastapi import APIRouter, Query
@@ -81,8 +82,24 @@ async def export_logs_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["id", "job_id", "severity", "event_type", "message", "keyword_matched", "created_at"])
+    writer.writerow([
+        "id", "job_id", "severity", "event_type", "message",
+        "keyword_matched",
+        "buyer_name", "buyer_phone", "buyer_email", "inquiry_message", "full_detail",
+        "created_at",
+    ])
     for log in logs:
+        # Parse lead details from JSON if present
+        details: dict = {}
+        if log.details:
+            try:
+                details = json.loads(log.details)
+            except Exception:
+                pass
+        # If details has a nested "lead" key (from webhook inject path), flatten it
+        if "lead" in details and isinstance(details["lead"], dict):
+            details = details["lead"]
+
         writer.writerow([
             log.id,
             log.job_id or "",
@@ -90,6 +107,11 @@ async def export_logs_csv(
             log.event_type,
             log.message,
             log.keyword_matched or "",
+            details.get("buyer_name", ""),
+            details.get("buyer_phone", ""),
+            details.get("buyer_email", ""),
+            details.get("message", details.get("text", "")),
+            details.get("full_detail", ""),
             log.created_at.isoformat() if log.created_at else "",
         ])
 
