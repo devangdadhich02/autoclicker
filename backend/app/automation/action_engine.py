@@ -12,6 +12,39 @@ from app.automation.browser_manager import BrowserManager
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.action_rule import ActionRule, ActionType
+from app.models.event_log import EventSeverity
+
+# IndiaMART inquiry panel selectors (tried in order, first match wins)
+_IM_INQUIRY_ROW_SELECTORS = [
+    ".byr-inqry-list .byr-inqry-item:first-child",
+    ".inquiry-list-item:first-child",
+    ".msg-list-item:first-child",
+    "[data-testid='inquiry-item']:first-child",
+    ".inqBox:first-child",
+]
+_IM_DETAIL_PANEL_SELECTORS = [
+    ".inqry-detail-panel",
+    ".inquiry-detail",
+    ".msg-detail-panel",
+    "[data-testid='inquiry-detail']",
+    ".byr-detail",
+]
+_IM_BUYER_NAME_SELECTORS = [
+    ".buyer-name", ".byr-name", ".contact-name",
+    "[data-testid='buyer-name']", ".inq-sender-name",
+]
+_IM_BUYER_PHONE_SELECTORS = [
+    ".buyer-phone", ".byr-phone", ".contact-phone",
+    "[data-testid='buyer-phone']", ".inq-phone", ".phone-no",
+]
+_IM_BUYER_EMAIL_SELECTORS = [
+    ".buyer-email", ".byr-email", ".contact-email",
+    "[data-testid='buyer-email']", ".inq-email",
+]
+_IM_MESSAGE_SELECTORS = [
+    ".inquiry-message", ".inq-msg", ".msg-content",
+    ".byr-msg", "[data-testid='inquiry-message']", ".inqDesc",
+]
 
 logger = get_logger(__name__)
 
@@ -25,6 +58,7 @@ class ActionEngine:
     def __init__(self, job_id: str, browser: BrowserManager) -> None:
         self.job_id = job_id
         self._browser = browser
+        self._last_lead_data: dict[str, Any] = {}
 
     async def execute_rule(self, rule: ActionRule) -> bool:
         """Execute a single action rule with full retry and fallback logic."""
@@ -136,7 +170,14 @@ class ActionEngine:
         if not selector:
             return False
         text = await page.inner_text(selector)
-        logger.info("Text extracted", job_id=self.job_id, text=text[:200])
+        text = text.strip()
+        logger.info("Text extracted", job_id=self.job_id, selector=selector, text=text[:300])
+        # Save extracted text to DB as a lead_data event
+        await self._save_lead_event(
+            event_type="lead_data_extracted",
+            message=f"Extracted: {text[:500]}",
+            details=json.dumps({"selector": selector, "text": text, "rule": rule.name}),
+        )
         return True
 
     async def _handle_screenshot(self, rule: ActionRule) -> bool:
@@ -160,6 +201,9 @@ class ActionEngine:
         if not rule.target_url:
             return False
         payload = json.loads(rule.payload) if rule.payload else {}
+        # Auto-inject extracted lead data if available (from open_inquiry action before this)
+        if self._last_lead_data:
+            payload["lead"] = self._last_lead_data
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(rule.target_url, json=payload)
             response.raise_for_status()
@@ -179,10 +223,129 @@ class ActionEngine:
         return await self._handle_click(rule)
 
     async def _handle_open_inquiry(self, rule: ActionRule) -> bool:
-        return await self._handle_click(rule)
+        """Click first unread inquiry, wait for detail panel, extract all buyer fields."""
+        page = await self._browser.get_page()
+
+        # Step 1: Click the first inquiry row
+        clicked = False
+        click_selector = rule.selector or None
+        if click_selector:
+            try:
+                await page.wait_for_selector(click_selector, timeout=rule.timeout_ms)
+                await asyncio.sleep(random.uniform(0.2, 0.5))
+                await page.click(click_selector)
+                clicked = True
+            except PlaywrightTimeoutError:
+                pass
+
+        if not clicked:
+            for sel in _IM_INQUIRY_ROW_SELECTORS:
+                try:
+                    await page.wait_for_selector(sel, timeout=3000)
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+                    await page.click(sel)
+                    clicked = True
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+
+        if not clicked:
+            logger.warning("open_inquiry: no inquiry row found", job_id=self.job_id)
+            return False
+
+        # Step 2: Wait for detail panel to load
+        await asyncio.sleep(1.5)
+        detail_loaded = False
+        for sel in _IM_DETAIL_PANEL_SELECTORS:
+            try:
+                await page.wait_for_selector(sel, timeout=5000)
+                detail_loaded = True
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        # Step 3: Extract all available buyer fields
+        lead: dict[str, str] = {}
+
+        async def _try_extract(selectors: list[str], field: str) -> None:
+            for sel in selectors:
+                try:
+                    el = page.locator(sel).first
+                    val = await el.inner_text(timeout=2000)
+                    val = val.strip()
+                    if val:
+                        lead[field] = val
+                        return
+                except Exception:
+                    continue
+
+        await _try_extract(_IM_BUYER_NAME_SELECTORS, "buyer_name")
+        await _try_extract(_IM_BUYER_PHONE_SELECTORS, "buyer_phone")
+        await _try_extract(_IM_BUYER_EMAIL_SELECTORS, "buyer_email")
+        await _try_extract(_IM_MESSAGE_SELECTORS, "message")
+
+        # Fallback: if detail loaded, grab full panel text
+        if detail_loaded and not lead:
+            for sel in _IM_DETAIL_PANEL_SELECTORS:
+                try:
+                    panel_text = await page.inner_text(sel)
+                    lead["full_detail"] = panel_text.strip()[:1000]
+                    break
+                except Exception:
+                    continue
+
+        self._last_lead_data = lead
+
+        if lead:
+            msg = (
+                f"Lead extracted — "
+                f"Name: {lead.get('buyer_name', 'N/A')} | "
+                f"Phone: {lead.get('buyer_phone', 'N/A')} | "
+                f"Email: {lead.get('buyer_email', 'N/A')} | "
+                f"Msg: {lead.get('message', lead.get('full_detail', 'N/A'))[:200]}"
+            )
+            logger.info("Lead extracted", job_id=self.job_id, lead=lead)
+            await self._save_lead_event(
+                event_type="lead_extracted",
+                message=msg,
+                details=json.dumps(lead),
+            )
+        else:
+            logger.warning("open_inquiry: panel opened but no fields extracted", job_id=self.job_id)
+            await self._save_lead_event(
+                event_type="lead_extracted",
+                message="Inquiry opened but buyer details not found — check CSS selectors",
+                details=json.dumps({"detail_loaded": detail_loaded}),
+            )
+
+        return True
 
     async def _handle_copy_lead(self, rule: ActionRule) -> bool:
         return await self._handle_extract_text(rule)
+
+    async def _save_lead_event(
+        self,
+        event_type: str,
+        message: str,
+        details: str | None = None,
+    ) -> None:
+        """Persist extracted lead data to EventLog in DB."""
+        try:
+            from app.db.session import get_session_factory
+            from app.services.event_log_service import EventLogService
+            factory = get_session_factory()
+            async with factory() as db:
+                svc = EventLogService(db)
+                await svc.create(
+                    event_type=event_type,
+                    message=message,
+                    severity=EventSeverity.info,
+                    job_id=self.job_id,
+                    details=details,
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.error("Failed to save lead event", job_id=self.job_id, error=str(exc))
 
     async def _resolve_selector(self, page: Page, rule: ActionRule) -> str | None:
         """Try primary selector then fallback selector."""
