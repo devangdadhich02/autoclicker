@@ -19,6 +19,23 @@ from app.services.event_log_service import EventLogService
 from app.services.job_service import JobService
 from app.services.keyword_service import KeywordService
 
+# URL patterns that indicate session has expired / login required
+_LOGIN_URL_PATTERNS = [
+    "login", "signin", "sign-in", "auth", "session", "logout",
+    "account/login", "user/login", "sso", "oauth", "reauthenticate",
+    # IndiaMART specific
+    "seller.indiamart.com/login", "indiamart.com/login",
+    "indiamart.com/signin",
+]
+
+# Page title / body text patterns that indicate login wall
+_LOGIN_PAGE_TEXT_PATTERNS = [
+    "please login", "please sign in", "session expired",
+    "your session has expired", "log in to continue",
+    "sign in to continue", "login to continue", "login required",
+    "please log in",
+]
+
 logger = get_logger(__name__)
 
 
@@ -138,6 +155,13 @@ class JobRunner:
             logger.warning("URL check failed, navigating", job_id=self.job_id, error=str(exc))
             await browser.navigate(job.target_url)
 
+        # ── Session Expiry Detection ─────────────────────────────────────────
+        current_url = page.url.lower()
+        if await self._is_session_expired(page, current_url):
+            await self._handle_session_expired(current_url)
+            return
+        # ────────────────────────────────────────────────────────────────────
+
         if not keywords:
             return
 
@@ -179,6 +203,45 @@ class JobRunner:
                     success=success_count,
                     total=len(exec_results),
                 )
+
+    async def _is_session_expired(self, page: Any, current_url: str) -> bool:
+        """Returns True if the browser has been redirected to a login page."""
+        # Check URL patterns
+        for pattern in _LOGIN_URL_PATTERNS:
+            if pattern in current_url:
+                return True
+        # Check page text for login wall messages
+        try:
+            page_text = await page.evaluate("() => (document.body.innerText || '').toLowerCase()")
+            for pattern in _LOGIN_PAGE_TEXT_PATTERNS:
+                if pattern in page_text:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _handle_session_expired(self, current_url: str) -> None:
+        """Log critical alert and pause the job so seller knows to re-login."""
+        msg = (
+            f"Session expired — browser redirected to login page ({current_url}). "
+            "Please re-run the login script: "
+            "docker compose exec backend python scripts/login_browser.py "
+            f"--profile <profile_name> --url <target_url>"
+        )
+        logger.critical(
+            "SESSION EXPIRED — job paused, re-login required",
+            job_id=self.job_id,
+            redirect_url=current_url,
+        )
+        await self._log_event(
+            event_type="session_expired",
+            message=msg,
+            severity=EventSeverity.critical,
+        )
+        # Pause job — set to error so dashboard shows it clearly
+        await self._update_status(JobStatus.error)
+        # Stop the runner so it doesn't keep looping uselessly
+        self._shutdown_event.set()
 
     async def _get_or_create_browser(self, job: AutomationJob) -> BrowserManager:
         if self._browser is None or not self._browser.is_alive:
