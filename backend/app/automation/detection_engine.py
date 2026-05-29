@@ -19,6 +19,7 @@ class KeywordLike(Protocol):
     score: float
     cooldown_seconds: int
     is_active: bool
+    location_filter: str | None = None
 
 logger = get_logger(__name__)
 
@@ -100,6 +101,23 @@ class DetectionEngine:
                 pattern = self._get_pattern(kw)
                 match = pattern.search(text)
                 if match:
+                    # ── Location Filter Check ─────────────────────────────────────
+                    if kw.location_filter:
+                        loc_lower = kw.location_filter.lower()
+                        text_lower = text.lower()
+                        # Check if any of the comma-separated locations match
+                        locations = [l.strip() for l in loc_lower.split(",") if l.strip()]
+                        location_found = any(loc in text_lower for loc in locations)
+                        if not location_found:
+                            # Keyword matched but location didn't match — skip
+                            logger.debug(
+                                "Keyword matched but location filter failed",
+                                job_id=self.job_id,
+                                keyword=kw.value,
+                                location_filter=kw.location_filter,
+                            )
+                            continue
+                    # ─────────────────────────────────────────────────────────────
                     snippet = text[max(0, match.start() - 60): match.end() + 60]
                     result = DetectionResult(
                         matched=True,

@@ -16,6 +16,7 @@ def make_keyword(
     priority: int = 5,
     score: float = 1.0,
     cooldown_seconds: int = 0,
+    location_filter: str | None = None,
 ) -> types.SimpleNamespace:
     return types.SimpleNamespace(
         id=kw_id,
@@ -25,6 +26,7 @@ def make_keyword(
         priority=priority,
         score=score,
         cooldown_seconds=cooldown_seconds,
+        location_filter=location_filter,
         is_active=True,
         match_count=0,
     )
@@ -111,3 +113,35 @@ def test_invalid_regex_does_not_crash():
     kw = make_keyword("kw10", "[invalid(regex", match_type=MatchType.regex)
     results = engine.evaluate("some text [invalid(regex", [kw])
     assert results == []
+
+
+def test_location_filter_match():
+    """Keyword matches and location filter matches."""
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw11", "steel pipe", location_filter="Bangalore")
+    results = engine.evaluate("Buyer from Bangalore wants steel pipe", [kw])
+    assert len(results) == 1
+
+
+def test_location_filter_no_match():
+    """Keyword matches but location filter does not match."""
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw12", "steel pipe", location_filter="Bangalore")
+    results = engine.evaluate("Buyer from Delhi wants steel pipe", [kw])
+    assert len(results) == 0
+
+
+def test_location_filter_multiple_locations():
+    """Location filter with multiple comma-separated locations."""
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw13", "copper wire", location_filter="Bangalore, Delhi, Mumbai")
+    results = engine.evaluate("Buyer from Delhi wants copper wire", [kw])
+    assert len(results) == 1
+
+
+def test_location_filter_not_set():
+    """When location_filter is None, keyword should match regardless of location."""
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw14", "pvc pipe", location_filter=None)
+    results = engine.evaluate("Buyer from Chennai wants pvc pipe", [kw])
+    assert len(results) == 1

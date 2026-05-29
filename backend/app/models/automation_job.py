@@ -35,7 +35,7 @@ class AutomationJob(TimestampMixin, Base):
         Enum(JobStatus), nullable=False, default=JobStatus.idle
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    poll_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    poll_interval_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=15.0)
     last_heartbeat: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

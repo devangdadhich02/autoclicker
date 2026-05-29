@@ -59,8 +59,8 @@ function CreateJobModal({ onClose, onCreated }: { onClose: () => void; onCreated
             <input className="input" placeholder="https://seller.indiamart.com/..." value={url} onChange={e => setUrl(e.target.value)} required />
           </div>
           <div>
-            <label className="label">Poll Interval (seconds)</label>
-            <input type="number" className="input" min={5} max={3600} value={interval} onChange={e => setInterval(+e.target.value)} required />
+            <label className="label">Poll Interval (seconds, e.g., 0.5 = 500ms)</label>
+            <input type="number" className="input" min={0.1} max={3600} step={0.1} value={interval} onChange={e => setInterval(+e.target.value)} required />
           </div>
           <div className="flex gap-2 pt-2">
             <button type="button" onClick={onClose} className="btn-ghost flex-1 justify-center">Cancel</button>

@@ -18,6 +18,7 @@ export default function JobDetailPage() {
   const [kwValue, setKwValue] = useState('')
   const [kwType, setKwType] = useState('contains')
   const [kwPriority, setKwPriority] = useState(5)
+  const [kwLocation, setKwLocation] = useState('')
   const [kwSaving, setKwSaving] = useState(false)
 
   // New action form
@@ -53,9 +54,15 @@ export default function JobDetailPage() {
     e.preventDefault()
     setKwSaving(true)
     try {
-      await api.post(`/jobs/${jobId}/keywords`, { value: kwValue, match_type: kwType, priority: kwPriority })
+      await api.post(`/jobs/${jobId}/keywords`, { 
+        value: kwValue, 
+        match_type: kwType, 
+        priority: kwPriority,
+        location_filter: kwLocation || null
+      })
       toast.success('Keyword added')
       setKwValue('')
+      setKwLocation('')
       await fetchAll()
     } catch (err: any) { toast.error(err?.response?.data?.detail ?? 'Failed') }
     finally { setKwSaving(false) }
@@ -154,6 +161,10 @@ export default function JobDetailPage() {
               <label className="label">Priority</label>
               <input type="number" className="input" min={1} max={10} value={kwPriority} onChange={e => setKwPriority(+e.target.value)} />
             </div>
+            <div className="flex-1 min-w-[160px]">
+              <label className="label">Location Filter (optional)</label>
+              <input className="input" placeholder="Bangalore, Delhi, Mumbai" value={kwLocation} onChange={e => setKwLocation(e.target.value)} />
+            </div>
             <button type="submit" disabled={kwSaving} className="btn-primary">
               {kwSaving ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add
             </button>
@@ -165,7 +176,10 @@ export default function JobDetailPage() {
               <div key={kw.id} className="card flex items-center gap-3">
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-white">{kw.value}</p>
-                  <p className="text-xs text-gray-500">{kw.match_type} · priority {kw.priority} · matched {kw.match_count}x</p>
+                  <p className="text-xs text-gray-500">
+                    {kw.match_type} · priority {kw.priority} · matched {kw.match_count}x
+                    {kw.location_filter && <span className="text-blue-400"> · 📍 {kw.location_filter}</span>}
+                  </p>
                 </div>
                 <button onClick={() => toggleKeyword(kw)} className={kw.is_active ? 'text-green-400' : 'text-gray-600'}>
                   {kw.is_active ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}

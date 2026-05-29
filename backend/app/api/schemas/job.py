@@ -11,7 +11,7 @@ class JobCreate(BaseModel):
     name: str = Field(min_length=2, max_length=255)
     target_url: str = Field(min_length=5, max_length=2048)
     description: str | None = None
-    poll_interval_seconds: int = Field(default=15, ge=5, le=3600)
+    poll_interval_seconds: float = Field(default=15.0, ge=0.1, le=3600)
     browser_profile_name: str | None = None
     scheduler_cron: str | None = None
 
@@ -20,7 +20,7 @@ class JobUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=255)
     target_url: str | None = Field(default=None, min_length=5, max_length=2048)
     description: str | None = None
-    poll_interval_seconds: int | None = Field(default=None, ge=5, le=3600)
+    poll_interval_seconds: float | None = Field(default=None, ge=0.1, le=3600)
     browser_profile_name: str | None = None
     scheduler_cron: str | None = None
     is_active: bool | None = None

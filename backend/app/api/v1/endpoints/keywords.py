@@ -3,7 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Response, status
 
 from app.api.deps import CurrentUser, DbSession, OperatorUser
+from pydantic import BaseModel, Field
+
 from app.api.schemas.keyword import KeywordCreate, KeywordResponse, KeywordUpdate
+from app.models.keyword import MatchType
 from app.core.exceptions import AuthorizationError, NotFoundError
 from app.services.job_service import JobService
 from app.services.keyword_service import KeywordService
@@ -77,3 +80,43 @@ async def delete_keyword(
     except NotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class KeywordsBulkCreate(BaseModel):
+    """Create multiple keywords from comma-separated string with same location filter."""
+    keywords: str = Field(..., min_length=1, description="Comma-separated keywords like 'steel pipe, copper wire, pvc pipe'")
+    location_filter: str | None = Field(default=None, description="Location filter like 'Bangalore, New York, Delhi'")
+    match_type: MatchType = MatchType.contains
+    priority: int = Field(default=5, ge=1, le=10)
+    cooldown_seconds: int = Field(default=300, ge=0)
+
+
+@router.post("/bulk", response_model=list[KeywordResponse], status_code=status.HTTP_201_CREATED)
+async def create_keywords_bulk(
+    job_id: str, body: KeywordsBulkCreate, db: DbSession, current_user: OperatorUser
+) -> list[KeywordResponse]:
+    """Create multiple keywords at once from comma-separated list."""
+    await _assert_job_access(job_id, current_user, db)
+    svc = KeywordService(db)
+
+    # Parse comma-separated keywords
+    keyword_values = [k.strip() for k in body.keywords.split(",") if k.strip()]
+    if not keyword_values:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid keywords provided")
+
+    created: list[KeywordResponse] = []
+    for value in keyword_values:
+        kw = await svc.create(
+            job_id=job_id,
+            value=value,
+            match_type=body.match_type,
+            case_sensitive=False,
+            priority=body.priority,
+            score=1.0,
+            category=None,
+            location_filter=body.location_filter,
+            cooldown_seconds=body.cooldown_seconds,
+        )
+        created.append(KeywordResponse.model_validate(kw))
+
+    return created
