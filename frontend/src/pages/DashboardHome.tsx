@@ -1,9 +1,10 @@
 import { useEffect, useState, useRef } from 'react'
-import { Activity, TrendingUp, AlertTriangle, Play, Zap, RefreshCw } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Activity, TrendingUp, AlertTriangle, Play, Zap, RefreshCw, Cookie, ChevronRight } from 'lucide-react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import { api } from '../lib/api'
 import { useAuthStore } from '../store/authStore'
-import type { AnalyticsSummary, EventLog } from '../types'
+import type { AnalyticsSummary, BrowserProfileStatus, EventLog } from '../types'
 import { formatDistanceToNow } from 'date-fns'
 import clsx from 'clsx'
 
@@ -44,6 +45,7 @@ export default function DashboardHome() {
   const { accessToken } = useAuthStore()
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null)
   const [logs, setLogs] = useState<EventLog[]>([])
+  const [session, setSession] = useState<BrowserProfileStatus | null>(null)
   const [wsLive, setWsLive] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -55,12 +57,14 @@ export default function DashboardHome() {
 
   async function fetchData() {
     try {
-      const [sumRes, logRes] = await Promise.all([
+      const [sumRes, logRes, profRes] = await Promise.all([
         api.get('/logs/analytics/summary'),
         api.get('/logs?limit=20'),
+        api.get('/profiles/indiamart').catch(() => ({ data: null })),
       ])
       setSummary(sumRes.data)
       setLogs(logRes.data)
+      setSession(profRes.data)
     } catch {}
   }
 
@@ -106,6 +110,40 @@ export default function DashboardHome() {
           </button>
         </div>
       </div>
+
+      {/* IndiaMART session strip */}
+      <Link
+        to="/dashboard/session"
+        className={clsx(
+          'card flex items-center justify-between gap-4 transition-colors hover:border-gray-600',
+          session?.status === 'ready' && 'border-green-800/60 bg-green-950/20',
+          session?.status === 'incomplete' && 'border-yellow-800/60 bg-yellow-950/20',
+          session?.status === 'missing' && 'border-red-800/50 bg-red-950/10',
+        )}
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className={clsx(
+            'w-10 h-10 rounded-lg flex items-center justify-center shrink-0',
+            session?.status === 'ready' ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-400',
+          )}>
+            <Cookie size={18} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-white">IndiaMART login session</p>
+            <p className="text-xs text-gray-500 truncate">
+              {session
+                ? session.status_message
+                : 'Run login.ps1 on laptop, then check session here'}
+            </p>
+            {session?.uploaded_at && (
+              <p className="text-xs text-gray-600 mt-0.5">
+                Uploaded {formatDistanceToNow(new Date(session.uploaded_at), { addSuffix: true })}
+              </p>
+            )}
+          </div>
+        </div>
+        <ChevronRight size={18} className="text-gray-500 shrink-0" />
+      </Link>
 
       {/* Stats */}
       {summary && (

@@ -222,16 +222,19 @@ class ActionEngine:
     async def _handle_mark_important(self, rule: ActionRule) -> bool:
         return await self._handle_click(rule)
 
-    async def _handle_open_inquiry(self, rule: ActionRule) -> bool:
-        """Click first unread inquiry, wait for detail panel, extract all buyer fields."""
+    async def extract_latest_inquiry(
+        self,
+        click_selector: str | None = None,
+        timeout_ms: int = 10_000,
+    ) -> dict[str, str]:
+        """Open first inquiry row and extract buyer fields (IndiaMART)."""
         page = await self._browser.get_page()
 
         # Step 1: Click the first inquiry row
         clicked = False
-        click_selector = rule.selector or None
         if click_selector:
             try:
-                await page.wait_for_selector(click_selector, timeout=rule.timeout_ms)
+                await page.wait_for_selector(click_selector, timeout=timeout_ms)
                 await asyncio.sleep(random.uniform(0.2, 0.5))
                 await page.click(click_selector)
                 clicked = True
@@ -251,7 +254,7 @@ class ActionEngine:
 
         if not clicked:
             logger.warning("open_inquiry: no inquiry row found", job_id=self.job_id)
-            return False
+            return {}
 
         # Step 2: Wait for detail panel to load
         await asyncio.sleep(1.5)
@@ -295,7 +298,13 @@ class ActionEngine:
                     continue
 
         self._last_lead_data = lead
+        return lead
 
+    async def _handle_open_inquiry(self, rule: ActionRule) -> bool:
+        lead = await self.extract_latest_inquiry(
+            click_selector=rule.selector,
+            timeout_ms=rule.timeout_ms,
+        )
         if lead:
             msg = (
                 f"Lead extracted — "
@@ -310,15 +319,15 @@ class ActionEngine:
                 message=msg,
                 details=json.dumps(lead),
             )
-        else:
-            logger.warning("open_inquiry: panel opened but no fields extracted", job_id=self.job_id)
-            await self._save_lead_event(
-                event_type="lead_extracted",
-                message="Inquiry opened but buyer details not found — check CSS selectors",
-                details=json.dumps({"detail_loaded": detail_loaded}),
-            )
+            return True
 
-        return True
+        logger.warning("open_inquiry: no inquiry or fields extracted", job_id=self.job_id)
+        await self._save_lead_event(
+            event_type="lead_extracted",
+            message="Inquiry opened but buyer details not found — check CSS selectors",
+            details=json.dumps({}),
+        )
+        return False
 
     async def _handle_copy_lead(self, rule: ActionRule) -> bool:
         return await self._handle_extract_text(rule)
@@ -328,11 +337,16 @@ class ActionEngine:
         event_type: str,
         message: str,
         details: str | None = None,
+        keyword_matched: str | None = None,
+        job_name: str = "",
+        page_url: str | None = None,
     ) -> None:
-        """Persist extracted lead data to EventLog in DB."""
+        """Persist extracted lead data to EventLog + per-job CSV on disk."""
         try:
             from app.db.session import get_session_factory
             from app.services.event_log_service import EventLogService
+            from app.services.lead_store import append_lead_row, parse_details_json
+
             factory = get_session_factory()
             async with factory() as db:
                 svc = EventLogService(db)
@@ -342,8 +356,20 @@ class ActionEngine:
                     severity=EventSeverity.info,
                     job_id=self.job_id,
                     details=details,
+                    keyword_matched=keyword_matched,
                 )
                 await db.commit()
+
+            parsed = parse_details_json(details)
+            append_lead_row(
+                job_id=self.job_id,
+                job_name=job_name or self.job_id[:8],
+                event_type=event_type,
+                keyword_matched=keyword_matched,
+                message=message,
+                page_url=page_url,
+                details=parsed,
+            )
         except Exception as exc:
             logger.error("Failed to save lead event", job_id=self.job_id, error=str(exc))
 

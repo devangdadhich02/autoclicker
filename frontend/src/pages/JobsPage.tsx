@@ -26,7 +26,8 @@ function StatusBadge({ status }: { status: JobStatus }) {
 
 function CreateJobModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [name, setName] = useState('')
-  const [url, setUrl] = useState('')
+  const [url, setUrl] = useState('https://seller.indiamart.com/bltxn/?pref=recent')
+  const [profile, setProfile] = useState('indiamart')
   const [interval, setInterval] = useState(15)
   const [loading, setLoading] = useState(false)
 
@@ -34,7 +35,12 @@ function CreateJobModal({ onClose, onCreated }: { onClose: () => void; onCreated
     e.preventDefault()
     setLoading(true)
     try {
-      await api.post('/jobs', { name, target_url: url, poll_interval_seconds: interval })
+      await api.post('/jobs', {
+        name,
+        target_url: url,
+        poll_interval_seconds: interval,
+        browser_profile_name: profile.trim() || null,
+      })
       toast.success('Job created')
       onCreated()
       onClose()
@@ -57,6 +63,11 @@ function CreateJobModal({ onClose, onCreated }: { onClose: () => void; onCreated
           <div>
             <label className="label">Target URL</label>
             <input className="input" placeholder="https://seller.indiamart.com/..." value={url} onChange={e => setUrl(e.target.value)} required />
+          </div>
+          <div>
+            <label className="label">Browser Profile Name</label>
+            <input className="input" placeholder="indiamart" value={profile} onChange={e => setProfile(e.target.value)} required />
+            <p className="text-xs text-gray-500 mt-1">Must match profile from login.ps1 (usually indiamart)</p>
           </div>
           <div>
             <label className="label">Poll Interval (seconds, e.g., 0.5 = 500ms)</label>
@@ -154,6 +165,9 @@ export default function JobsPage() {
                     <StatusBadge status={job.status} />
                   </div>
                   <p className="text-xs text-gray-500 truncate">{job.target_url}</p>
+                  {job.browser_profile_name && (
+                    <p className="text-xs text-blue-500/80">Profile: {job.browser_profile_name}</p>
+                  )}
                   <div className="flex items-center gap-4 mt-1.5 text-xs text-gray-600">
                     <span>Leads: <span className="text-purple-400 font-medium">{job.total_leads_detected}</span></span>
                     <span>Actions: <span className="text-blue-400 font-medium">{job.total_actions_executed}</span></span>

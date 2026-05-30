@@ -78,4 +78,4 @@ Job start karo — automation **logged in** hoke chalegi! 🎉
 ### "Upload failed"
 → Manually zip file bhej do:
    - Local folder: `%USERPROFILE%\.velora_profiles\indiamart`
-   - Server par: `/home/autoclicker/autoclicker/data/browser_profiles/indiamart/`
+   - Server par (Docker): `/data/browser_profiles/indiamart/`

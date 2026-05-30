@@ -1,13 +1,14 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Briefcase, ScrollText, Users, Settings,
-  LogOut, Activity, Zap
+  LogOut, Zap, Cookie,
 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import toast from 'react-hot-toast'
 
 const navItems = [
   { to: '/dashboard', label: 'Overview', icon: LayoutDashboard, end: true },
+  { to: '/dashboard/session', label: 'IndiaMART Session', icon: Cookie },
   { to: '/dashboard/jobs', label: 'Automation Jobs', icon: Briefcase },
   { to: '/dashboard/logs', label: 'Event Logs', icon: ScrollText },
   { to: '/dashboard/users', label: 'Users', icon: Users, adminOnly: true },

@@ -49,6 +49,14 @@ export default function LogsPage() {
     URL.revokeObjectURL(url)
   }
 
+  async function exportLeadsCsv() {
+    const resp = await api.get('/logs/export/leads/csv', { params: { limit: 5000 }, responseType: 'blob' })
+    const url = URL.createObjectURL(resp.data)
+    const a = document.createElement('a')
+    a.href = url; a.download = 'velora_leads.csv'; a.click()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
@@ -58,7 +66,8 @@ export default function LogsPage() {
         </div>
         <div className="flex gap-2">
           <button onClick={() => fetchLogs()} className="btn-ghost py-1.5 px-3 text-xs"><RefreshCw size={12} /> Refresh</button>
-          <button onClick={exportCsv} className="btn-ghost py-1.5 px-3 text-xs"><Download size={12} /> Export CSV</button>
+          <button onClick={exportLeadsCsv} className="btn-primary py-1.5 px-3 text-xs"><Download size={12} /> Export Leads CSV</button>
+          <button onClick={exportCsv} className="btn-ghost py-1.5 px-3 text-xs"><Download size={12} /> All Logs CSV</button>
         </div>
       </div>
 

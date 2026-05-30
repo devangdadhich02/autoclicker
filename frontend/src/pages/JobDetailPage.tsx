@@ -26,6 +26,8 @@ export default function JobDetailPage() {
   const [actType, setActType] = useState('click')
   const [actSelector, setActSelector] = useState('')
   const [actSaving, setActSaving] = useState(false)
+  const [profileName, setProfileName] = useState('')
+  const [profileSaving, setProfileSaving] = useState(false)
 
   useEffect(() => {
     if (jobId) {
@@ -44,6 +46,7 @@ export default function JobDetailPage() {
         api.get(`/jobs/${jobId}/actions`),
       ])
       setJob(j.data)
+      setProfileName(j.data.browser_profile_name ?? '')
       setKeywords(kw.data)
       setActions(act.data)
     } catch { if (!silent) toast.error('Failed to load job') }
@@ -97,6 +100,22 @@ export default function JobDetailPage() {
     await fetchAll()
   }
 
+  async function saveProfile(e: React.FormEvent) {
+    e.preventDefault()
+    setProfileSaving(true)
+    try {
+      await api.patch(`/jobs/${jobId}`, {
+        browser_profile_name: profileName.trim() || null,
+      })
+      toast.success('Browser profile updated — restart job to apply')
+      await fetchAll()
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail ?? 'Failed to update profile')
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
   if (loading) return (
     <div className="flex items-center justify-center h-64 text-gray-500">
       <Loader2 size={24} className="animate-spin" />
@@ -115,6 +134,26 @@ export default function JobDetailPage() {
           <p className="text-xs text-gray-500">{job.target_url}</p>
         </div>
       </div>
+
+      <form onSubmit={saveProfile} className="card flex gap-3 items-end flex-wrap">
+        <div className="flex-1 min-w-[200px]">
+          <label className="label">Browser Profile Name (from login.ps1)</label>
+          <input
+            className="input"
+            placeholder="indiamart"
+            value={profileName}
+            onChange={e => setProfileName(e.target.value)}
+          />
+          {!profileName && (
+            <p className="text-xs text-amber-500/90 mt-1">
+              Required for IndiaMART login session — set to indiamart after running login.ps1
+            </p>
+          )}
+        </div>
+        <button type="submit" disabled={profileSaving} className="btn-primary">
+          {profileSaving ? <Loader2 size={13} className="animate-spin" /> : 'Save Profile'}
+        </button>
+      </form>
 
       {/* Stats row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -171,7 +210,11 @@ export default function JobDetailPage() {
           </form>
 
           <div className="space-y-2">
-            {keywords.length === 0 && <p className="text-gray-500 text-sm text-center py-6">No keywords yet. Add one above.</p>}
+            {keywords.length === 0 && (
+              <p className="text-amber-500/90 text-sm text-center py-6">
+                No keywords yet — leads will NOT be detected until you add product/city keywords above.
+              </p>
+            )}
             {keywords.map(kw => (
               <div key={kw.id} className="card flex items-center gap-3">
                 <div className="flex-1 min-w-0">

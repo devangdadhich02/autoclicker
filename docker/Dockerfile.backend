@@ -23,7 +23,7 @@ RUN playwright install chromium --with-deps
 COPY backend/ .
 COPY scripts/ ./scripts/
 
-RUN mkdir -p /data/browser_profiles /data/screenshots /data/logs
+RUN mkdir -p /data/browser_profiles /data/screenshots /data/logs /data/leads
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

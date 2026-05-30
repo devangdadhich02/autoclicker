@@ -122,3 +122,52 @@ async def export_logs_csv(
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+@router.get("/export/leads/csv")
+async def export_leads_csv(
+    db: DbSession,
+    current_user: CurrentUser,
+    job_id: str | None = Query(default=None),
+    limit: int = Query(default=5000, ge=1, le=5000),
+) -> StreamingResponse:
+    """Export only lead events (keyword_detected + lead_extracted) for spreadsheet use."""
+    svc = EventLogService(db)
+    logs = await svc.list_logs(job_id=job_id, limit=limit)
+    lead_logs = [log for log in logs if log.event_type in ("keyword_detected", "lead_extracted")]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "created_at", "job_id", "event_type", "keyword_matched", "message",
+        "buyer_name", "buyer_phone", "buyer_email", "inquiry_message", "context_snippet",
+    ])
+    for log in lead_logs:
+        details: dict = {}
+        if log.details:
+            try:
+                details = json.loads(log.details)
+            except Exception:
+                pass
+        if "lead" in details and isinstance(details["lead"], dict):
+            details = details["lead"]
+        writer.writerow([
+            log.created_at.isoformat() if log.created_at else "",
+            log.job_id or "",
+            log.event_type,
+            log.keyword_matched or "",
+            log.message,
+            details.get("buyer_name", ""),
+            details.get("buyer_phone", ""),
+            details.get("buyer_email", ""),
+            details.get("message", details.get("text", "")),
+            details.get("context_snippet", ""),
+        ])
+
+    output.seek(0)
+    filename = f"velora_leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from playwright.async_api import (
-    Browser,
     BrowserContext,
     BrowserType,
     Page,
@@ -22,20 +21,12 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Randomized human-like viewport sizes
-_VIEWPORTS = [
-    {"width": 1366, "height": 768},
-    {"width": 1440, "height": 900},
-    {"width": 1920, "height": 1080},
-    {"width": 1280, "height": 800},
-]
-
-# User agents to rotate
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-]
+# Stable fingerprint — rotating UA breaks persisted login sessions
+_DEFAULT_VIEWPORT = {"width": 1366, "height": 768}
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 class BrowserManager:
@@ -48,7 +39,6 @@ class BrowserManager:
         self.job_id = job_id
         self.profile_name = profile_name or f"job_{job_id[:8]}"
         self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._launch_count = 0
@@ -60,22 +50,27 @@ class BrowserManager:
 
     @property
     def is_alive(self) -> bool:
-        return (
-            self._browser is not None
-            and self._browser.is_connected()
-            and self._page is not None
-            and not self._page.is_closed()
-        )
+        """Persistent context uses _context, not _browser."""
+        if self._context is None or self._page is None:
+            return False
+        try:
+            return not self._page.is_closed()
+        except Exception:
+            return False
 
     async def launch(self) -> Page:
         """Launch browser with stealth settings and persistent profile."""
         if self.is_alive:
             return self._page  # type: ignore[return-value]
 
+        # Close stale context before relaunch (prevents profile lock / EPIPE)
+        if self._context is not None or self._playwright is not None:
+            await self.close()
+
         self.profile_path.mkdir(parents=True, exist_ok=True)
         self._playwright = await async_playwright().start()
-        viewport = random.choice(_VIEWPORTS)
-        user_agent = random.choice(_USER_AGENTS)
+        viewport = _DEFAULT_VIEWPORT
+        user_agent = _DEFAULT_USER_AGENT
 
         browser_type: BrowserType = getattr(self._playwright, settings.BROWSER_TYPE)
 
@@ -133,11 +128,17 @@ class BrowserManager:
             await self.launch()
         return self._page  # type: ignore[return-value]
 
-    async def navigate(self, url: str, wait_until: str = "domcontentloaded") -> None:
+    async def navigate(
+        self,
+        url: str,
+        wait_until: str = "domcontentloaded",
+        timeout_ms: int | None = None,
+    ) -> None:
         page = await self.get_page()
         await self._human_delay(500, 1200)
+        timeout = timeout_ms or settings.BROWSER_NAVIGATION_TIMEOUT_MS
         try:
-            await page.goto(url, wait_until=wait_until, timeout=30_000)
+            await page.goto(url, wait_until=wait_until, timeout=timeout)
         except Exception as exc:
             logger.warning("Navigation error", job_id=self.job_id, url=url, error=str(exc))
             raise
@@ -181,7 +182,6 @@ class BrowserManager:
         except Exception as exc:
             logger.warning("Error closing browser", job_id=self.job_id, error=str(exc))
         finally:
-            self._browser = None
             self._context = None
             self._page = None
             self._playwright = None

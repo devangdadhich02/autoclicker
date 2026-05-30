@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 from datetime import UTC, datetime
 from typing import Any
@@ -8,22 +9,28 @@ from typing import Any
 from app.automation.action_engine import ActionEngine
 from app.automation.browser_manager import BrowserManager
 from app.automation.detection_engine import DetectionEngine
+from app.automation.indiamart_page import (
+    collect_inquiry_text,
+    is_indiamart_login_url,
+    is_indiamart_seller_url,
+    wait_for_page_ready,
+)
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_session_factory
 from app.models.automation_job import AutomationJob, JobStatus
 from app.models.event_log import EventSeverity
 from app.models.keyword import Keyword
-from app.models.action_rule import ActionRule
+from app.models.action_rule import ActionRule, ActionType
 from app.services.event_log_service import EventLogService
 from app.services.job_service import JobService
 from app.services.keyword_service import KeywordService
 
-# URL patterns that indicate session has expired / login required
+# URL path patterns that indicate session has expired (avoid broad "auth" substring)
 _LOGIN_URL_PATTERNS = [
-    "login", "signin", "sign-in", "auth", "session", "logout",
-    "account/login", "user/login", "sso", "oauth", "reauthenticate",
-    # IndiaMART specific
+    "/login", "/signin", "/sign-in", "/logout",
+    "account/login", "user/login", "sso/login", "oauth",
+    "reauthenticate", "session-expired",
     "seller.indiamart.com/login", "indiamart.com/login",
     "indiamart.com/signin",
 ]
@@ -99,6 +106,9 @@ class JobRunner:
                     break
 
                 self._poll_interval = job.poll_interval_seconds
+                # Heartbeat before slow navigation so watchdog does not kill the job
+                await self._heartbeat()
+
                 browser = await self._get_or_create_browser(job)
                 keywords = await self._load_keywords()
                 action_rules = await self._load_action_rules()
@@ -146,14 +156,7 @@ class JobRunner:
     ) -> None:
         page = await browser.get_page()
 
-        # Check if still on the right page, navigate if needed
-        try:
-            current_url = page.url
-            if not current_url or current_url == "about:blank":
-                await browser.navigate(job.target_url)
-        except Exception as exc:
-            logger.warning("URL check failed, navigating", job_id=self.job_id, error=str(exc))
-            await browser.navigate(job.target_url)
+        await self._ensure_on_target_page(browser, job, page)
 
         # ── Session Expiry Detection ─────────────────────────────────────────
         current_url = page.url.lower()
@@ -163,13 +166,15 @@ class JobRunner:
         # ────────────────────────────────────────────────────────────────────
 
         if not keywords:
+            logger.warning(
+                "No active keywords — job cannot detect leads. Add keywords in dashboard.",
+                job_id=self.job_id,
+            )
             return
 
-        # Collect visible text from page
-        try:
-            page_text = await page.evaluate("() => document.body.innerText || ''")
-        except Exception as exc:
-            logger.warning("Failed to get page text", job_id=self.job_id, error=str(exc))
+        page_text = await self._collect_page_text(page, job.target_url)
+        if not page_text.strip():
+            logger.warning("Empty page text after load", job_id=self.job_id, url=page.url)
             return
 
         # Run detection
@@ -182,18 +187,48 @@ class JobRunner:
                 count=len(results),
                 top=results[0].keyword_value,
             )
+            page_url = page.url
+            action_engine = ActionEngine(self.job_id, browser)
+            has_open_inquiry = any(
+                r.action_type == ActionType.open_inquiry for r in action_rules
+            )
+
             for result in results:
                 await self._log_event(
                     "keyword_detected",
                     f"Keyword '{result.keyword_value}' matched: {result.context_snippet[:200]}",
                     EventSeverity.info,
                     keyword_matched=result.keyword_value,
+                    details={
+                        "keyword": result.keyword_value,
+                        "context_snippet": result.context_snippet[:500],
+                        "page_url": page_url,
+                    },
+                    job_name=job.name,
+                    page_url=page_url,
                 )
                 await self._increment_lead()
 
+            # IndiaMART: auto-open inquiry for buyer phone/email in CSV
+            if is_indiamart_seller_url(job.target_url) and not has_open_inquiry:
+                lead = await action_engine.extract_latest_inquiry()
+                if lead:
+                    msg = (
+                        f"Lead extracted — "
+                        f"Name: {lead.get('buyer_name', 'N/A')} | "
+                        f"Phone: {lead.get('buyer_phone', 'N/A')}"
+                    )
+                    await action_engine._save_lead_event(
+                        event_type="lead_extracted",
+                        message=msg,
+                        details=json.dumps(lead),
+                        keyword_matched=results[0].keyword_value,
+                        job_name=job.name,
+                        page_url=page_url,
+                    )
+
             # Execute action chain
             if action_rules:
-                action_engine = ActionEngine(self.job_id, browser)
                 exec_results = await action_engine.execute_chain(action_rules)
                 success_count = sum(exec_results)
                 await self._increment_action(success_count)
@@ -204,9 +239,67 @@ class JobRunner:
                     total=len(exec_results),
                 )
 
+    async def _ensure_on_target_page(
+        self,
+        browser: BrowserManager,
+        job: AutomationJob,
+        page: Any,
+    ) -> None:
+        """Navigate to target_url when blank, logged out, or off seller domain."""
+        try:
+            current_url = page.url or ""
+        except Exception:
+            current_url = ""
+
+        current_lower = current_url.lower()
+        target_lower = job.target_url.lower()
+
+        if not current_url or current_url == "about:blank":
+            await self._navigate_to_target(browser, job.target_url)
+            return
+
+        if is_indiamart_seller_url(target_lower):
+            if is_indiamart_login_url(current_lower):
+                return
+            if is_indiamart_seller_url(current_lower):
+                # Re-open leads page if target is bltxn/messagebox but browser is elsewhere
+                if any(p in target_lower for p in ("bltxn", "messagebox", "lead")):
+                    if not any(p in current_lower for p in ("bltxn", "messagebox", "lead")):
+                        await self._navigate_to_target(browser, job.target_url)
+                return
+
+        if target_lower not in current_lower:
+            await self._navigate_to_target(browser, job.target_url)
+
+    async def _navigate_to_target(self, browser: BrowserManager, url: str) -> None:
+        await browser.navigate(url)
+        page = await browser.get_page()
+        if is_indiamart_seller_url(url):
+            ready = await wait_for_page_ready(page)
+            logger.info(
+                "IndiaMART page load",
+                job_id=self.job_id,
+                ready=ready,
+                url=page.url,
+            )
+
+    async def _collect_page_text(self, page: Any, target_url: str) -> str:
+        try:
+            body_text = await page.evaluate("() => document.body.innerText || ''")
+        except Exception as exc:
+            logger.warning("Failed to get page text", job_id=self.job_id, error=str(exc))
+            return ""
+
+        if is_indiamart_seller_url(target_url):
+            inquiry_text = await collect_inquiry_text(page)
+            if inquiry_text:
+                return f"{body_text}\n---\n{inquiry_text}"
+        return body_text
+
     async def _is_session_expired(self, page: Any, current_url: str) -> bool:
         """Returns True if the browser has been redirected to a login page."""
-        # Check URL patterns
+        if is_indiamart_login_url(current_url):
+            return True
         for pattern in _LOGIN_URL_PATTERNS:
             if pattern in current_url:
                 return True
@@ -224,9 +317,8 @@ class JobRunner:
         """Log critical alert and pause the job so seller knows to re-login."""
         msg = (
             f"Session expired — browser redirected to login page ({current_url}). "
-            "Please re-run the login script: "
-            "docker compose exec backend python scripts/login_browser.py "
-            f"--profile <profile_name> --url <target_url>"
+            "Re-run login on your PC: .\\login.ps1 — then set job Browser Profile = indiamart "
+            "and restart the job."
         )
         logger.critical(
             "SESSION EXPIRED — job paused, re-login required",
@@ -244,10 +336,18 @@ class JobRunner:
         self._shutdown_event.set()
 
     async def _get_or_create_browser(self, job: AutomationJob) -> BrowserManager:
+        profile = job.browser_profile_name
+        if not profile and is_indiamart_seller_url(job.target_url):
+            logger.warning(
+                "IndiaMART job has no browser_profile_name — using empty session. "
+                "Set profile to 'indiamart' in dashboard after login.ps1",
+                job_id=self.job_id,
+            )
+
         if self._browser is None or not self._browser.is_alive:
             self._browser = BrowserManager(
                 job_id=self.job_id,
-                profile_name=job.browser_profile_name,
+                profile_name=profile,
             )
             await self._browser.launch()
             self._browser_created_at = datetime.now(UTC)
@@ -285,7 +385,13 @@ class JobRunner:
         message: str,
         severity: EventSeverity,
         keyword_matched: str | None = None,
+        details: dict[str, Any] | None = None,
+        job_name: str = "",
+        page_url: str | None = None,
     ) -> None:
+        from app.services.lead_store import append_lead_row
+
+        details_json = json.dumps(details) if details else None
         factory = get_session_factory()
         async with factory() as db:
             svc = EventLogService(db)
@@ -295,8 +401,21 @@ class JobRunner:
                 severity=severity,
                 job_id=self.job_id,
                 keyword_matched=keyword_matched,
+                details=details_json,
             )
             await db.commit()
+
+        if event_type in ("keyword_detected", "lead_extracted"):
+            append_lead_row(
+                job_id=self.job_id,
+                job_name=job_name or self.job_id[:8],
+                event_type=event_type,
+                keyword_matched=keyword_matched,
+                message=message,
+                page_url=page_url,
+                details=details,
+                context_snippet=(details or {}).get("context_snippet"),
+            )
 
     async def _load_job(self) -> AutomationJob:
         factory = get_session_factory()

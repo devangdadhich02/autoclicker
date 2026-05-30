@@ -114,3 +114,26 @@ export interface TokenResponse {
   refresh_token: string
   token_type: string
 }
+
+export interface LinkedJobSummary {
+  id: string
+  name: string
+  status: string
+  target_url: string
+}
+
+export interface BrowserProfileStatus {
+  profile_name: string
+  status: 'missing' | 'incomplete' | 'ready' | string
+  status_message: string
+  storage_path: string
+  file_count: number
+  size_bytes: number
+  has_cookies: boolean
+  has_local_storage: boolean
+  uploaded_at: string | null
+  login_url: string | null
+  uploaded_from: string | null
+  last_modified_at: string | null
+  linked_jobs: LinkedJobSummary[]
+}

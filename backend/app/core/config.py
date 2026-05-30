@@ -47,7 +47,9 @@ class Settings(BaseSettings):
     BROWSER_TYPE: Literal["chromium", "firefox", "webkit"] = "chromium"
     BROWSER_PROFILE_DIR: Path = Path("/data/browser_profiles")
     SCREENSHOT_DIR: Path = Path("/data/screenshots")
+    LEADS_CSV_DIR: Path = Path("/data/leads")
     BROWSER_RECYCLE_INTERVAL_HOURS: int = 6
+    BROWSER_NAVIGATION_TIMEOUT_MS: int = 90_000
 
     # ── Automation ──────────────────────────────────────────────────────────
     MAX_CONCURRENT_JOBS: int = 5
@@ -55,7 +57,7 @@ class Settings(BaseSettings):
     ACTION_RETRY_ATTEMPTS: int = 3
     ACTION_RETRY_DELAY_SECONDS: float = 2.0
     WATCHDOG_CHECK_INTERVAL_SECONDS: int = 30
-    HEARTBEAT_TIMEOUT_SECONDS: int = 90
+    HEARTBEAT_TIMEOUT_SECONDS: int = 180
 
     # ── Logging ─────────────────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
@@ -81,7 +83,7 @@ class Settings(BaseSettings):
             return json.loads(v)
         return [o.strip() for o in v.split(",") if o.strip()]
 
-    @field_validator("BROWSER_PROFILE_DIR", "SCREENSHOT_DIR", "LOG_DIR", mode="after")
+    @field_validator("BROWSER_PROFILE_DIR", "SCREENSHOT_DIR", "LOG_DIR", "LEADS_CSV_DIR", mode="after")
     @classmethod
     def ensure_dir(cls, v: Path) -> Path:
         v.mkdir(parents=True, exist_ok=True)

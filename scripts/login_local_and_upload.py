@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
+import json
 import sys
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+META_FILENAME = ".velora_session_meta.json"
 
 
 def zip_profile(profile_dir: Path, output_zip: Path) -> None:
@@ -31,39 +34,68 @@ def zip_profile(profile_dir: Path, output_zip: Path) -> None:
                 zf.write(file, file.relative_to(profile_dir))
 
 
-def upload_to_server(zip_path: Path, server_ip: str, ssh_user: str, ssh_pass: str, profile_name: str) -> bool:
-    """Upload zipped profile to server via SCP/SSH."""
+def write_session_meta(profile_dir: Path, meta: dict) -> None:
+    (profile_dir / META_FILENAME).write_text(
+        json.dumps(meta, indent=2),
+        encoding="utf-8",
+    )
+
+
+def upload_to_server(
+    zip_path: Path,
+    server_ip: str,
+    ssh_user: str,
+    ssh_pass: str,
+    profile_name: str,
+    session_meta: dict | None = None,
+) -> tuple[bool, str]:
+    """Upload zipped profile to /data/browser_profiles (Docker volume path)."""
+    remote_dir = f"/data/browser_profiles/{profile_name}"
     try:
         import paramiko
     except ImportError:
         print("ERROR: paramiko not installed. Run: pip install paramiko")
-        return False
+        return False, remote_dir
 
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(server_ip, username=ssh_user, password=ssh_pass)
 
-        # Create remote directory
-        remote_dir = f"/home/{ssh_user}/autoclicker/data/browser_profiles/{profile_name}"
-        ssh.exec_command(f"mkdir -p {remote_dir}")
+        ssh.exec_command(f"mkdir -p {remote_dir} && chmod -R 755 /data/browser_profiles 2>/dev/null || true")
 
-        # Upload zip
         sftp = ssh.open_sftp()
         remote_zip = f"/tmp/{profile_name}_profile.zip"
         sftp.put(str(zip_path), remote_zip)
+        sftp.close()
 
-        # Extract on server
         stdin, stdout, stderr = ssh.exec_command(
-            f"cd {remote_dir} && unzip -o {remote_zip} && rm {remote_zip}"
+            f"cd {remote_dir} && unzip -o {remote_zip} && rm -f {remote_zip}"
         )
-        stdout.channel.recv_exit_status()
+        exit_code = stdout.channel.recv_exit_status()
+        if exit_code != 0:
+            err = stderr.read().decode(errors="replace")
+            print(f"Unzip failed (exit {exit_code}): {err}")
+            ssh.close()
+            return False, remote_dir
+
+        if session_meta:
+            import tempfile
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False, encoding="utf-8"
+            ) as tmp:
+                json.dump(session_meta, tmp)
+                local_meta = tmp.name
+            sftp = ssh.open_sftp()
+            sftp.put(local_meta, f"{remote_dir}/{META_FILENAME}")
+            sftp.close()
+            Path(local_meta).unlink(missing_ok=True)
 
         ssh.close()
-        return True
+        return True, remote_dir
     except Exception as e:
         print(f"Upload failed: {e}")
-        return False
+        return False, remote_dir
 
 
 async def run_local_login(
@@ -123,6 +155,24 @@ async def run_local_login(
         except asyncio.TimeoutError:
             print(f"\n  Timeout! Saving session...")
 
+        final_url = page.url
+        final_lower = final_url.lower()
+        login_ok = not any(p in final_lower for p in ("login", "signin", "sign-in"))
+        if not login_ok:
+            print("\n  WARNING: Still on login page. Finish login before pressing ENTER.")
+        else:
+            print(f"\n  Login looks OK (current page: {final_url})")
+
+        session_meta = {
+            "profile_name": profile_name,
+            "uploaded_at": datetime.now(UTC).isoformat(),
+            "login_url": url,
+            "final_url": final_url,
+            "uploaded_from": "login_local_and_upload",
+            "login_verified": login_ok,
+        }
+        write_session_meta(profile_dir, session_meta)
+
         await browser.close()
 
     print(f"\n  Local session saved to: {profile_dir}")
@@ -139,14 +189,20 @@ async def run_local_login(
         zip_profile(profile_dir, zip_path)
         
         print(f"  Uploading...")
-        if upload_to_server(zip_path, server_ip, ssh_user, ssh_pass, profile_name):
+        ok, remote_dir = upload_to_server(
+            zip_path, server_ip, ssh_user, ssh_pass, profile_name, session_meta
+        )
+        if ok:
             print(f"\n  SUCCESS! Session uploaded to server.")
-            print(f"  Profile '{profile_name}' is now ready on the server.")
-            print(f"  In Velora dashboard, set 'Browser Profile Name' = '{profile_name}'")
+            print(f"  Server path: {remote_dir}")
+            print(f"  Open Velora dashboard → IndiaMART Session (sidebar)")
+            print(f"  to confirm session status and details.")
+            print(f"  Set job Browser Profile Name = '{profile_name}' and restart job.")
         else:
             print(f"\n  FAILED to upload. Manual upload needed:")
             print(f"  Zip file: {zip_path}")
-            print(f"  Upload this to server: {remote_dir}")
+            print(f"  On server run: sudo mkdir -p {remote_dir}")
+            print(f"  Then unzip profile into: {remote_dir}")
 
     print(f"{'='*60}\n")
 
@@ -162,8 +218,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--url",
-        default="https://seller.indiamart.com/",
-        help="URL to open for login. Default: https://seller.indiamart.com/",
+        default="https://seller.indiamart.com/bltxn/?pref=recent",
+        help="URL to open for login. Default: IndiaMART recent leads page",
     )
     parser.add_argument(
         "--server",
