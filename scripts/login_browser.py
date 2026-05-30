@@ -5,32 +5,69 @@ Run this script ONCE to log into any website (e.g. IndiaMART seller portal).
 The browser session/cookies are saved to the profile directory.
 After this, the automation reuses the saved session automatically — no re-login needed.
 
-Usage (Docker):
+Usage (Docker with virtual display - for servers without GUI):
     docker compose exec backend python scripts/login_browser.py --profile indiamart --url https://seller.indiamart.com/
 
-Usage (local):
+Usage (local with visible browser):
     python scripts/login_browser.py --profile indiamart --url https://seller.indiamart.com/
+
+For remote servers without display, use xvfb-run:
+    xvfb-run python scripts/login_browser.py --profile indiamart --url https://seller.indiamart.com/
 
 Arguments:
     --profile   Name for the browser profile (e.g. indiamart, tradeindia)
     --url       URL to open for login (default: https://seller.indiamart.com/)
     --timeout   Seconds to wait for manual login (default: 300 = 5 minutes)
+    --xvfb      Use virtual display automatically (default: auto-detect)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 
-async def run_login(profile_name: str, url: str, timeout_seconds: int) -> None:
+def setup_virtual_display() -> tuple[bool, subprocess.Popen | None]:
+    """Setup Xvfb virtual display if no DISPLAY is available."""
+    if os.environ.get("DISPLAY"):
+        return False, None  # Real display available
+
+    # Try to start Xvfb
+    try:
+        xvfb_proc = subprocess.Popen(
+            ["Xvfb", ":99", "-screen", "0", "1280x800x24", "-ac"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.environ["DISPLAY"] = ":99"
+        print("  Virtual display (Xvfb) started on :99")
+        return True, xvfb_proc
+    except FileNotFoundError:
+        print("ERROR: Xvfb not found. Install it: apt-get install xvfb")
+        print("  Or run with: xvfb-run python scripts/login_browser.py ...")
+        return False, None
+
+
+async def run_login(profile_name: str, url: str, timeout_seconds: int, use_xvfb: bool | None = None) -> None:
     try:
         from playwright.async_api import async_playwright
     except ImportError:
         print("ERROR: playwright not installed. Run: pip install playwright && playwright install chromium")
         sys.exit(1)
+
+    # Setup virtual display if needed
+    xvfb_proc = None
+    if use_xvfb or (use_xvfb is None and not os.environ.get("DISPLAY")):
+        using_xvfb, xvfb_proc = setup_virtual_display()
+        if not using_xvfb and not os.environ.get("DISPLAY"):
+            print("\nERROR: No display available and Xvfb not found.")
+            print("Install Xvfb: apt-get install xvfb")
+            print("Then run: xvfb-run python scripts/login_browser.py ...")
+            sys.exit(1)
 
     # Determine profile directory
     # Works both inside Docker (/data/browser_profiles) and locally (./data/browser_profiles)
@@ -58,10 +95,15 @@ async def run_login(profile_name: str, url: str, timeout_seconds: int) -> None:
     print(f"  Saved at: {profile_dir}")
     print(f"  URL     : {url}")
     print(f"  Timeout : {timeout_seconds} seconds")
+    if xvfb_proc:
+        print(f"  Display : Virtual (Xvfb) — no GUI visible")
     print(f"{'='*60}")
-    print("\n  A browser window will open.")
-    print("  Please LOG IN manually in the browser.")
-    print("  Once logged in, press ENTER here to save the session.")
+    print("\n  Browser is starting...")
+    if xvfb_proc:
+        print("  (Running in virtual display — you won't see a window)")
+        print("  The session will still be saved correctly.")
+    print("  Please wait for the page to load...")
+    print("  Once loaded, press ENTER to save the session.")
     print("  (You have", timeout_seconds, "seconds)\n")
 
     async with async_playwright() as pw:
@@ -108,6 +150,11 @@ async def run_login(profile_name: str, url: str, timeout_seconds: int) -> None:
 
         await browser.close()
 
+    # Cleanup Xvfb
+    if xvfb_proc:
+        xvfb_proc.terminate()
+        print("  Virtual display stopped.")
+
     print(f"\n  Session saved to: {profile_dir}")
     print(f"\n  NOW — In your Velora job, set:")
     print(f"    Browser Profile Name = {profile_name}")
@@ -135,8 +182,20 @@ def main() -> None:
         default=300,
         help="Seconds to wait for manual login. Default: 300 (5 minutes)",
     )
+    parser.add_argument(
+        "--xvfb",
+        action="store_true",
+        default=None,
+        help="Force use of virtual display (Xvfb). Auto-detected if no DISPLAY env var.",
+    )
+    parser.add_argument(
+        "--no-xvfb",
+        dest="xvfb",
+        action="store_false",
+        help="Disable virtual display even if no DISPLAY is available.",
+    )
     args = parser.parse_args()
-    asyncio.run(run_login(args.profile, args.url, args.timeout))
+    asyncio.run(run_login(args.profile, args.url, args.timeout, args.xvfb))
 
 
 if __name__ == "__main__":
