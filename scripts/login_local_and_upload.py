@@ -62,6 +62,8 @@ def upload_to_server(
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(server_ip, username=ssh_user, password=ssh_pass)
 
+        # Remove old session first so uploads do not stack — one profile = one active session
+        ssh.exec_command(f"rm -rf {remote_dir}")
         ssh.exec_command(f"mkdir -p {remote_dir} && chmod -R 755 /data/browser_profiles 2>/dev/null || true")
 
         sftp = ssh.open_sftp()
@@ -70,7 +72,7 @@ def upload_to_server(
         sftp.close()
 
         stdin, stdout, stderr = ssh.exec_command(
-            f"cd {remote_dir} && unzip -o {remote_zip} && rm -f {remote_zip}"
+            f"unzip -o {remote_zip} -d {remote_dir} && rm -f {remote_zip}"
         )
         exit_code = stdout.channel.recv_exit_status()
         if exit_code != 0:
@@ -195,8 +197,8 @@ async def run_local_login(
         if ok:
             print(f"\n  SUCCESS! Session uploaded to server.")
             print(f"  Server path: {remote_dir}")
-            print(f"  Open Velora dashboard → IndiaMART Session (sidebar)")
-            print(f"  to confirm session status and details.")
+            print(f"  Previous '{profile_name}' session was replaced (not stacked).")
+            print(f"  Open Velora dashboard → Seller Session to verify YES/NO.")
             print(f"  Set job Browser Profile Name = '{profile_name}' and restart job.")
         else:
             print(f"\n  FAILED to upload. Manual upload needed:")

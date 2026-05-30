@@ -212,7 +212,7 @@ export default function JobDetailPage() {
           <div className="space-y-2">
             {keywords.length === 0 && (
               <p className="text-amber-500/90 text-sm text-center py-6">
-                No keywords yet — leads will NOT be detected until you add product/city keywords above.
+                No keywords yet. Add product or city keywords above to detect leads.
               </p>
             )}
             {keywords.map(kw => (

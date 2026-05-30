@@ -129,11 +129,11 @@ export default function DashboardHome() {
             <Cookie size={18} />
           </div>
           <div className="min-w-0">
-            <p className="text-sm font-medium text-white">IndiaMART login session</p>
+            <p className="text-sm font-medium text-white">IndiaMART seller session</p>
             <p className="text-xs text-gray-500 truncate">
-              {session
-                ? session.status_message
-                : 'Run login.ps1 on laptop, then check session here'}
+              {session?.status === 'ready'
+                ? 'YES — seller login is on the server'
+                : 'NO — seller login missing or invalid'}
             </p>
             {session?.uploaded_at && (
               <p className="text-xs text-gray-600 mt-0.5">

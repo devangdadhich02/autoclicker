@@ -23,12 +23,25 @@ _COOKIE_PATHS = (
 def _find_cookies_file(profile_dir: Path) -> Path | None:
     for rel in _COOKIE_PATHS:
         p = profile_dir / rel
-        if p.is_file() and p.stat().st_size > 0:
+        if p.is_file() and p.stat().st_size > 512:
             return p
     for p in profile_dir.rglob("Cookies"):
-        if p.is_file() and p.stat().st_size > 0:
+        if p.is_file() and p.stat().st_size > 512:
             return p
     return None
+
+
+def _has_chromium_profile_markers(profile_dir: Path) -> bool:
+    markers = (
+        "Local State",
+        "Default/Preferences",
+        "Default/Secure Preferences",
+    )
+    return any((profile_dir / m).is_file() for m in markers)
+
+
+def _is_auto_job_profile(profile_name: str) -> bool:
+    return profile_name.startswith("job_")
 
 
 def _has_local_storage(profile_dir: Path) -> bool:
@@ -71,17 +84,24 @@ def _inspect_profile_dir(profile_name: str, profile_dir: Path) -> BrowserProfile
         except Exception:
             pass
 
-    if uploaded_at is None and last_modified_at:
-        uploaded_at = last_modified_at
+    # UI shows only the latest upload metadata (written on each login.ps1 run), not old history
+    login_verified = bool(meta.get("login_verified"))
+    has_markers = _has_chromium_profile_markers(profile_dir)
 
     if file_count == 0:
-        status, msg = "missing", "Profile folder is empty — run login.ps1 on your PC"
-    elif not has_cookies and file_count < 3:
-        status, msg = "incomplete", "Upload looks incomplete — run login.ps1 again"
-    elif not has_cookies:
-        status, msg = "incomplete", "No cookie database found — login session may be invalid"
+        status, msg = "missing", "No profile files on server. Run login.ps1 on your laptop."
+    elif file_count < 10:
+        status, msg = (
+            "incomplete",
+            f"Only {file_count} files found (expected many more). Re-run login.ps1 and upload again.",
+        )
+    elif not has_cookies and not (has_markers and login_verified and file_count >= 20):
+        status, msg = (
+            "incomplete",
+            "Cookie database not found. Log in again via login.ps1, then press Refresh here.",
+        )
     else:
-        status, msg = "ready", "Session received and ready for automation"
+        status, msg = "ready", "IndiaMART login session is on the server and ready to use."
 
     return BrowserProfileStatus(
         profile_name=profile_name,
@@ -121,7 +141,7 @@ class ProfileService:
             for j in jobs
         ]
 
-    async def list_profiles(self) -> list[BrowserProfileStatus]:
+    async def list_profiles(self, login_only: bool = False) -> list[BrowserProfileStatus]:
         base = settings.BROWSER_PROFILE_DIR
         base.mkdir(parents=True, exist_ok=True)
 
@@ -129,16 +149,19 @@ class ProfileService:
         if base.is_dir():
             for child in base.iterdir():
                 if child.is_dir() and not child.name.startswith("."):
+                    if login_only and _is_auto_job_profile(child.name):
+                        continue
                     names.add(child.name)
 
-        result = await self._db.execute(
-            select(AutomationJob.browser_profile_name).where(
-                AutomationJob.browser_profile_name.isnot(None)
+        if not login_only:
+            result = await self._db.execute(
+                select(AutomationJob.browser_profile_name).where(
+                    AutomationJob.browser_profile_name.isnot(None)
+                )
             )
-        )
-        for row in result.scalars().all():
-            if row:
-                names.add(row)
+            for row in result.scalars().all():
+                if row and not (login_only and _is_auto_job_profile(row)):
+                    names.add(row)
 
         profiles: list[BrowserProfileStatus] = []
         for name in sorted(names):
@@ -149,7 +172,7 @@ class ProfileService:
                 status = BrowserProfileStatus(
                     profile_name=name,
                     status="missing",
-                    status_message="Profile not on server yet — run login.ps1 to upload",
+                    status_message="Profile not on server yet. Run login.ps1 on your laptop.",
                     storage_path=str(profile_dir),
                     file_count=0,
                     size_bytes=0,
@@ -169,7 +192,7 @@ class ProfileService:
             status = BrowserProfileStatus(
                 profile_name=profile_name,
                 status="missing",
-                status_message="Profile not found — run login.ps1 on your PC, then refresh",
+                status_message="Profile not found. Run login.ps1 on your laptop, then refresh this page.",
                 storage_path=str(profile_dir),
                 file_count=0,
                 size_bytes=0,
