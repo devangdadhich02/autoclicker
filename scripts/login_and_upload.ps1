@@ -19,14 +19,30 @@ Write-Host "Server: $Server" -ForegroundColor Green
 Write-Host "Profile: $Profile" -ForegroundColor Green
 Write-Host ""
 
-# Check Python
-$python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $python) {
+# Check Python (try multiple commands for Windows compatibility)
+$pythonCmd = $null
+foreach ($cmd in @("py", "python", "python3")) {
+    $found = Get-Command $cmd -ErrorAction SilentlyContinue
+    if ($found) {
+        $pythonCmd = $cmd
+        break
+    }
+}
+
+if (-not $pythonCmd) {
     Write-Host "ERROR: Python not found!" -ForegroundColor Red
     Write-Host "Please install Python from https://python.org" -ForegroundColor Red
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "Quick fix - Install Python:" -ForegroundColor Yellow
+    Write-Host "  1. Go to: https://python.org/downloads" -ForegroundColor Yellow
+    Write-Host "  2. Download Python 3.11+" -ForegroundColor Yellow
+    Write-Host "  3. Install with 'Add Python to PATH' checked" -ForegroundColor Yellow
+    Write-Host "  4. Re-open PowerShell and run again" -ForegroundColor Yellow
     Read-Host "Press Enter to exit"
     exit 1
 }
+
+Write-Host "Found Python: $pythonCmd" -ForegroundColor Green
 
 # Download script if not exists
 $scriptFile = "login_local_and_upload.py"
@@ -37,8 +53,8 @@ if (-not (Test-Path $scriptFile)) {
 
 # Install dependencies
 Write-Host "Installing dependencies (one-time)..." -ForegroundColor Yellow
-& python -m pip install playwright paramiko -q 2>$null
-& python -m playwright install chromium 2>$null
+& $pythonCmd -m pip install playwright paramiko -q 2>$null
+& $pythonCmd -m playwright install chromium 2>$null
 
 Write-Host ""
 Write-Host "Starting Chrome... Please login to IndiaMART when it opens." -ForegroundColor Green
@@ -46,7 +62,7 @@ Write-Host "After login, come back here and press ENTER to upload." -ForegroundC
 Write-Host ""
 
 # Run the script
-& python $scriptFile --server $Server --user $User --profile $Profile
+& $pythonCmd $scriptFile --server $Server --user $User --profile $Profile
 
 Write-Host ""
 Read-Host "Done! Press Enter to close"
