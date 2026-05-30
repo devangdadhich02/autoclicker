@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Seed initial admin user if not exists
     await _seed_admin()
+    await _ensure_indiamart_profile_names()
 
     # Start automation scheduler and auto-resume active jobs
     scheduler = get_scheduler()
@@ -71,6 +72,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await scheduler.shutdown_all()
     await close_engine()
     logger.info("Velora backend shutdown complete")
+
+
+async def _ensure_indiamart_profile_names() -> None:
+    """Persist indiamart profile on IndiaMART jobs created before the dashboard field existed."""
+    from sqlalchemy import select
+
+    from app.automation.indiamart_page import is_indiamart_seller_url
+    from app.models.automation_job import AutomationJob
+
+    factory = get_session_factory()
+    async with factory() as db:
+        result = await db.execute(select(AutomationJob))
+        updated = 0
+        for job in result.scalars().all():
+            if job.browser_profile_name:
+                continue
+            if job.target_url and is_indiamart_seller_url(job.target_url):
+                job.browser_profile_name = "indiamart"
+                updated += 1
+        if updated:
+            await db.commit()
+            logger.info(
+                "Set browser_profile_name=indiamart on IndiaMART jobs",
+                count=updated,
+            )
 
 
 async def _seed_admin() -> None:

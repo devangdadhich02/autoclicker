@@ -5,7 +5,8 @@
 param(
     [string]$Server = "68.178.160.47",
     [string]$User = "autoclicker",
-    [string]$Profile = "indiamart"
+    [string]$Profile = "indiamart",
+    [string]$Url = "https://seller.indiamart.com/bltxn/?pref=recent"
 )
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -53,10 +54,13 @@ if (-not $pythonCmd) {
     exit 1
 }
 
-# Download script if not exists
-$scriptFile = "login_local_and_upload.py"
+# Prefer script next to this .ps1; otherwise current folder; else download from GitHub
+$scriptFile = Join-Path $PSScriptRoot "login_local_and_upload.py"
 if (-not (Test-Path $scriptFile)) {
-    Write-Host "Downloading required files..." -ForegroundColor Yellow
+    $scriptFile = "login_local_and_upload.py"
+}
+if (-not (Test-Path $scriptFile)) {
+    Write-Host "Downloading login script from GitHub..." -ForegroundColor Yellow
     Invoke-WebRequest -Uri "https://raw.githubusercontent.com/devangdadhich02/autoclicker/main/scripts/login_local_and_upload.py" -OutFile $scriptFile
 }
 
@@ -70,8 +74,8 @@ Write-Host "Starting Chrome... Please login to IndiaMART when it opens." -Foregr
 Write-Host "After login, come back here and press ENTER to upload." -ForegroundColor Green
 Write-Host ""
 
-# Run the script
-& $pythonCmd $scriptFile --server $Server --user $User --profile $Profile
+# Run the script (uploads into Docker volume on server)
+& $pythonCmd $scriptFile --server $Server --user $User --profile $Profile --url $Url
 
 Write-Host ""
 Read-Host "Done! Press Enter to close"

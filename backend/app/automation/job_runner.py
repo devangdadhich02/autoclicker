@@ -338,10 +338,11 @@ class JobRunner:
     async def _get_or_create_browser(self, job: AutomationJob) -> BrowserManager:
         profile = job.browser_profile_name
         if not profile and is_indiamart_seller_url(job.target_url):
-            logger.warning(
-                "IndiaMART job has no browser_profile_name — using empty session. "
-                "Set profile to 'indiamart' in dashboard after login.ps1",
+            profile = "indiamart"
+            logger.info(
+                "IndiaMART job using default browser profile",
                 job_id=self.job_id,
+                profile=profile,
             )
 
         if self._browser is None or not self._browser.is_alive:
