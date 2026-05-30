@@ -19,30 +19,39 @@ Write-Host "Server: $Server" -ForegroundColor Green
 Write-Host "Profile: $Profile" -ForegroundColor Green
 Write-Host ""
 
-# Check Python (try multiple commands for Windows compatibility)
+# Check Python (try multiple commands and verify they actually work)
 $pythonCmd = $null
 foreach ($cmd in @("py", "python", "python3")) {
-    $found = Get-Command $cmd -ErrorAction SilentlyContinue
-    if ($found) {
-        $pythonCmd = $cmd
-        break
+    try {
+        $version = & $cmd --version 2>&1
+        if ($version -match "Python (\d+\.\d+)") {
+            $pythonCmd = $cmd
+            Write-Host "Found Python: $version" -ForegroundColor Green
+            break
+        }
+    } catch {
+        # Command not found or not working, try next
     }
 }
 
 if (-not $pythonCmd) {
-    Write-Host "ERROR: Python not found!" -ForegroundColor Red
-    Write-Host "Please install Python from https://python.org" -ForegroundColor Red
+    Write-Host "ERROR: Python not found or not working!" -ForegroundColor Red
+    Write-Host "" -ForegroundColor Red
+    Write-Host "Please install Python using ONE of these methods:" -ForegroundColor Yellow
     Write-Host "" -ForegroundColor Yellow
-    Write-Host "Quick fix - Install Python:" -ForegroundColor Yellow
-    Write-Host "  1. Go to: https://python.org/downloads" -ForegroundColor Yellow
-    Write-Host "  2. Download Python 3.11+" -ForegroundColor Yellow
-    Write-Host "  3. Install with 'Add Python to PATH' checked" -ForegroundColor Yellow
-    Write-Host "  4. Re-open PowerShell and run again" -ForegroundColor Yellow
+    Write-Host "METHOD 1 - Microsoft Store (Easiest):" -ForegroundColor Cyan
+    Write-Host "  Type 'python' in PowerShell and press Enter" -ForegroundColor White
+    Write-Host "  Microsoft Store will open - click 'Install' on Python 3.11" -ForegroundColor White
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "METHOD 2 - Python.org (Recommended):" -ForegroundColor Cyan
+    Write-Host "  1. Go to: https://python.org/downloads" -ForegroundColor White
+    Write-Host "  2. Download Python 3.11+" -ForegroundColor White
+    Write-Host "  3. IMPORTANT: Check 'Add Python to PATH' during install" -ForegroundColor White
+    Write-Host "  4. Re-open PowerShell after installation" -ForegroundColor White
+    Write-Host "" -ForegroundColor Yellow
     Read-Host "Press Enter to exit"
     exit 1
 }
-
-Write-Host "Found Python: $pythonCmd" -ForegroundColor Green
 
 # Download script if not exists
 $scriptFile = "login_local_and_upload.py"
