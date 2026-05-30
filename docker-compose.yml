@@ -19,6 +19,8 @@ services:
     env_file: backend/.env
     volumes:
       - velora_data:/data
+      # SSH upload from login.ps1 lands here — visible inside the container (no docker CLI needed for clients)
+      - ./browser_profiles:/data/browser_profiles
     ports:
       - "8000:8000"
     healthcheck:

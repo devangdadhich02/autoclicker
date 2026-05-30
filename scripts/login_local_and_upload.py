@@ -69,13 +69,50 @@ def _detect_compose_dir(ssh) -> str | None:
     return None
 
 
-def _upload_meta_docker(
-    ssh,
-    compose_dir: str,
-    profile_name: str,
-    container_profile: str,
-    session_meta: dict,
-) -> None:
+def _host_bind_profile_dir(ssh, compose_dir: str | None) -> str:
+    """Folder bind-mounted to /data/browser_profiles in docker-compose.yml."""
+    base = compose_dir or "/home/autoclicker/autoclicker"
+    return f"{base}/browser_profiles"
+
+
+def _detect_backend_container(ssh) -> str | None:
+    for docker_bin in ("docker", "sudo docker"):
+        code, out, _ = _ssh_exec(
+            ssh,
+            f"{docker_bin} ps --format '{{{{.Names}}}}' 2>/dev/null "
+            "| grep -E 'backend' | head -1",
+        )
+        if code == 0 and out.strip():
+            return out.strip()
+    return None
+
+
+def _count_files(ssh, path: str) -> int:
+    code, out, _ = _ssh_exec(ssh, f"find {path} -type f 2>/dev/null | wc -l")
+    if code != 0:
+        return 0
+    try:
+        return int(out.strip())
+    except ValueError:
+        return 0
+
+
+def _count_files_in_container(ssh, container: str, profile_name: str) -> int:
+    inner = f"/data/browser_profiles/{profile_name}"
+    for docker_bin in ("docker", "sudo docker"):
+        code, out, _ = _ssh_exec(
+            ssh,
+            f"{docker_bin} exec {container} find {inner} -type f 2>/dev/null | wc -l",
+        )
+        if code == 0:
+            try:
+                return int(out.strip())
+            except ValueError:
+                pass
+    return 0
+
+
+def _put_meta_sftp(ssh, remote_dir: str, session_meta: dict) -> None:
     import tempfile
 
     with tempfile.NamedTemporaryFile(
@@ -83,16 +120,88 @@ def _upload_meta_docker(
     ) as tmp:
         json.dump(session_meta, tmp)
         local_meta = tmp.name
-    host_meta = f"/tmp/{profile_name}_session_meta.json"
     sftp = ssh.open_sftp()
-    sftp.put(local_meta, host_meta)
+    sftp.put(local_meta, f"{remote_dir}/{META_FILENAME}")
     sftp.close()
     Path(local_meta).unlink(missing_ok=True)
-    _ssh_exec(
+
+
+def _upload_via_host_bind(
+    ssh,
+    remote_zip_host: str,
+    host_profile_dir: str,
+    profile_name: str,
+    session_meta: dict | None,
+) -> tuple[bool, str, int]:
+    """SSH unzip into project/browser_profiles — works without docker CLI for the client."""
+    _ssh_exec(ssh, f"rm -rf {host_profile_dir}")
+    code, _out, err = _ssh_exec(
         ssh,
-        f"cd {compose_dir} && docker compose cp {host_meta} "
-        f"backend:{container_profile}/{META_FILENAME} && rm -f {host_meta}",
+        f"mkdir -p {host_profile_dir} && unzip -o {remote_zip_host} -d {host_profile_dir} "
+        f"&& rm -f {remote_zip_host}",
     )
+    if code != 0:
+        print(f"  Host upload failed: {err}")
+        return False, host_profile_dir, 0
+    if session_meta:
+        _put_meta_sftp(ssh, host_profile_dir, session_meta)
+    file_count = _count_files(ssh, host_profile_dir)
+    print(f"  Uploaded via SSH → {host_profile_dir}")
+    print(f"  Files on server folder: {file_count}")
+    return True, host_profile_dir, file_count
+
+
+def _upload_via_docker_cp(
+    ssh,
+    remote_zip_host: str,
+    container: str,
+    profile_name: str,
+    session_meta: dict | None,
+) -> tuple[bool, str, int]:
+    inner_zip = f"/tmp/{profile_name}_profile.zip"
+    inner_dir = f"/data/browser_profiles/{profile_name}"
+    inner_cmd = (
+        f"rm -rf {inner_dir} && mkdir -p {inner_dir} && "
+        f"unzip -o {inner_zip} -d {inner_dir} && rm -f {inner_zip}"
+    )
+    for docker_bin in ("docker", "sudo docker"):
+        cp_code, _cp_out, cp_err = _ssh_exec(
+            ssh,
+            f"{docker_bin} cp {remote_zip_host} {container}:{inner_zip}",
+        )
+        if cp_code != 0:
+            continue
+        ex_code, _ex_out, ex_err = _ssh_exec(
+            ssh,
+            f"{docker_bin} exec {container} sh -c {json.dumps(inner_cmd)}",
+        )
+        _ssh_exec(ssh, f"rm -f {remote_zip_host}")
+        if ex_code != 0:
+            print(f"  Docker exec failed ({docker_bin}): {ex_err}")
+            continue
+        if session_meta:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False, encoding="utf-8"
+            ) as tmp:
+                json.dump(session_meta, tmp)
+                local_meta = tmp.name
+            host_meta = f"/tmp/{profile_name}_session_meta.json"
+            sftp = ssh.open_sftp()
+            sftp.put(local_meta, host_meta)
+            sftp.close()
+            Path(local_meta).unlink(missing_ok=True)
+            _ssh_exec(
+                ssh,
+                f"{docker_bin} cp {host_meta} {container}:{inner_dir}/{META_FILENAME} "
+                f"&& rm -f {host_meta}",
+            )
+        file_count = _count_files_in_container(ssh, container, profile_name)
+        print(f"  Uploaded via {docker_bin} → container {container}")
+        print(f"  Files visible to dashboard: {file_count}")
+        return True, inner_dir, file_count
+    return False, inner_dir, 0
 
 
 def upload_to_server(
@@ -105,20 +214,17 @@ def upload_to_server(
     compose_dir: str | None = None,
 ) -> tuple[bool, str, int]:
     """
-    Upload profile into the backend container volume (/data/browser_profiles).
-    SSH to host /data alone does NOT work when Velora runs in Docker.
-    Returns (ok, remote_path, file_count).
+    Upload session so the Velora dashboard can read it.
+    Prefer host bind folder (no docker permission). Verify file count before SUCCESS.
     """
-    host_profile = f"/data/browser_profiles/{profile_name}"
-    container_profile = f"/data/browser_profiles/{profile_name}"
     remote_zip_host = f"/tmp/{profile_name}_profile.zip"
-    file_count = 0
+    min_files = 10
 
     try:
         import paramiko
     except ImportError:
         print("ERROR: paramiko not installed. Run: pip install paramiko")
-        return False, host_profile, 0
+        return False, "", 0
 
     try:
         ssh = paramiko.SSHClient()
@@ -130,81 +236,84 @@ def upload_to_server(
         sftp.close()
 
         compose = compose_dir or _detect_compose_dir(ssh)
-        used_docker = False
+        bind_base = _host_bind_profile_dir(ssh, compose)
+        host_profile_dir = f"{bind_base}/{profile_name}"
+        _ssh_exec(ssh, f"mkdir -p {bind_base}")
 
-        if compose:
-            inner_zip = f"/tmp/{profile_name}_profile.zip"
-            inner_cmd = (
-                f"rm -rf {container_profile} && mkdir -p {container_profile} && "
-                f"unzip -o {inner_zip} -d {container_profile} && rm -f {inner_zip}"
-            )
-            docker_cmd = (
-                f"cd {compose} && "
-                f"docker compose cp {remote_zip_host} backend:{inner_zip} && "
-                f"docker compose exec -T backend sh -c {json.dumps(inner_cmd)} && "
-                f"rm -f {remote_zip_host}"
-            )
-            code, out, err = _ssh_exec(ssh, docker_cmd)
-            if code == 0:
-                used_docker = True
-                remote_path = container_profile
-                print(f"  Uploaded via Docker ({compose}) → {remote_path}")
-            else:
-                print(f"  Docker upload failed, trying host path: {err or out}")
+        ok = False
+        remote_path = host_profile_dir
+        file_count = 0
+        container_count = 0
 
-        if not used_docker:
-            _ssh_exec(ssh, f"rm -rf {host_profile}")
-            code, out, err = _ssh_exec(
-                ssh,
-                f"mkdir -p {host_profile} && unzip -o {remote_zip_host} -d {host_profile} "
-                f"&& rm -f {remote_zip_host}",
-            )
-            if code != 0:
-                print(f"Unzip failed (exit {code}): {err or out}")
-                ssh.close()
-                return False, host_profile, 0
-            remote_path = host_profile
-            print(f"  Uploaded to host path: {remote_path}")
+        # 1) Host bind folder — client SSH only; matches docker-compose ./browser_profiles mount
+        ok, remote_path, file_count = _upload_via_host_bind(
+            ssh, remote_zip_host, host_profile_dir, profile_name, session_meta
+        )
+        if not ok:
+            # zip was removed; re-upload for docker attempt
+            sftp = ssh.open_sftp()
+            sftp.put(str(zip_path), remote_zip_host)
+            sftp.close()
+
+        container = _detect_backend_container(ssh)
+        if container:
+            container_count = _count_files_in_container(ssh, container, profile_name)
+
+        # 2) If bind mount not wired yet (host has files, container sees 0), try docker cp
+        if ok and file_count >= min_files and container_count < min_files:
             print(
-                "  NOTE: If Velora uses Docker, files may not appear in the dashboard. "
-                "Use docker compose on the server or re-run this script after deploy."
+                "  Host folder has files but the app container does not see them yet."
             )
-
-        if session_meta:
-            if used_docker and compose:
-                _upload_meta_docker(
-                    ssh, compose, profile_name, container_profile, session_meta
+            print("  Trying direct docker copy...")
+            sftp = ssh.open_sftp()
+            sftp.put(str(zip_path), remote_zip_host)
+            sftp.close()
+            d_ok, d_path, container_count = _upload_via_docker_cp(
+                ssh, remote_zip_host, container, profile_name, session_meta
+            )
+            if d_ok and container_count >= min_files:
+                remote_path = d_path
+                file_count = container_count
+            elif file_count >= min_files and container_count < min_files:
+                print(
+                    "\n  *** SERVER NEEDS ONE-TIME UPDATE (admin, not client) ***"
                 )
-            else:
-                import tempfile
+                print(
+                    "  On the server once: cd ~/autoclicker && git pull && "
+                    "mkdir -p browser_profiles && docker compose up -d --build"
+                )
+                print(
+                    "  Then run login.ps1 again. Client steps stay the same."
+                )
+                ssh.close()
+                return False, remote_path, container_count
 
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False, encoding="utf-8"
-                ) as tmp:
-                    json.dump(session_meta, tmp)
-                    local_meta = tmp.name
-                sftp = ssh.open_sftp()
-                sftp.put(local_meta, f"{remote_path}/{META_FILENAME}")
-                sftp.close()
-                Path(local_meta).unlink(missing_ok=True)
-
-        if used_docker and compose:
-            code, out, _ = _ssh_exec(
-                ssh,
-                f"cd {compose} && docker compose exec -T backend "
-                f"find {container_profile} -type f 2>/dev/null | wc -l",
+        elif not ok and container:
+            sftp = ssh.open_sftp()
+            sftp.put(str(zip_path), remote_zip_host)
+            sftp.close()
+            ok, remote_path, file_count = _upload_via_docker_cp(
+                ssh, remote_zip_host, container, profile_name, session_meta
             )
-            if code == 0:
-                try:
-                    file_count = int(out.strip())
-                except ValueError:
-                    file_count = 0
+            container_count = file_count
 
         ssh.close()
-        return True, remote_path, file_count
+
+        visible = max(file_count, container_count)
+        if not ok or visible < min_files:
+            print(
+                f"\n  UPLOAD NOT ACCEPTED: only {visible} files (need {min_files}+)."
+            )
+            print("  Dashboard will show NO until this succeeds.")
+            return False, remote_path, visible
+
+        print(
+            f"\n  Verified: {visible} files — dashboard Seller Session should show YES."
+        )
+        return True, remote_path, visible
     except Exception as e:
         print(f"Upload failed: {e}")
-        return False, host_profile, 0
+        return False, "", 0
 
 
 async def run_local_login(
@@ -311,25 +420,19 @@ async def run_local_login(
             compose_dir=compose_dir,
         )
         if ok:
-            print("\n  SUCCESS! Session uploaded to server.")
-            print(f"  Server path: {remote_dir}")
-            print(f"  Files on server: {file_count}")
-            if file_count < 10:
-                print(
-                    "  WARNING: Very few files — upload may be incomplete. "
-                    "Re-login, press ENTER, and check Seller Session = YES."
-                )
-            print(f"  Previous '{profile_name}' session was replaced (not stacked).")
-            print("  Open Velora dashboard → Seller Session (should show YES).")
-            print("  Restart your IndiaMART job if it was already running.")
+            print("\n  ========================================")
+            print("  SUCCESS — seller session is on the server")
+            print("  ========================================")
+            print(f"  Files stored: {file_count}")
+            print("  Open dashboard → Seller Session → Refresh → should be YES")
+            print("  If still NO, wait 10 seconds and Refresh again.")
         else:
-            print("\n  FAILED to upload. Manual upload:")
-            print(f"  Zip file: {zip_path}")
-            print(
-                f"  On server: cd ~/autoclicker && docker compose cp {zip_path} "
-                f"backend:/tmp/profile.zip && docker compose exec -T backend "
-                f"unzip -o /tmp/profile.zip -d {remote_dir}"
-            )
+            print("\n  ========================================")
+            print("  FAILED — session did NOT reach the dashboard")
+            print("  ========================================")
+            print("  Your login on this PC was saved, but the server did not get it.")
+            print("  Try login.ps1 again. If it fails twice, contact Velora support.")
+            sys.exit(1)
 
     print(f"{'='*60}\n")
 
