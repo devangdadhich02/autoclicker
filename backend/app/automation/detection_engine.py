@@ -61,8 +61,9 @@ def _keyword_search_terms(value: str, match_type: MatchType) -> list[str]:
     """
     if match_type == MatchType.regex:
         return [value]
-    parts = [p.strip() for p in value.split(",") if p.strip()]
-    return parts if len(parts) > 1 else [value]
+    raw = value.replace(";", ",")
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return parts if len(parts) > 1 else [value.strip()]
 
 
 class DetectionEngine:
@@ -96,6 +97,42 @@ class DetectionEngine:
             self._compiled_patterns[cache_key] = pattern
         return self._compiled_patterns[cache_key]
 
+    def _flexible_contains(
+        self, term: str, text: str, case_sensitive: bool
+    ) -> re.Match[str] | None:
+        """Fallback when exact substring fails (spacing/casing/product title variants)."""
+        flags = 0 if case_sensitive else re.IGNORECASE
+        t = term if case_sensitive else term.lower()
+        body = text if case_sensitive else text.lower()
+        if t in body:
+            return re.search(re.escape(term), text, flags)
+        words = [w for w in re.findall(r"[a-z0-9]+", t) if len(w) >= 3]
+        if len(words) >= 2:
+            hits = [w for w in words if w in body]
+            if len(hits) >= 2:
+                return re.search(re.escape(hits[0]), text, flags)
+        if len(words) == 1 and words[0] in body:
+            return re.search(re.escape(words[0]), text, flags)
+        return None
+
+    def evaluate_blocks(self, text: str, keywords: list[Any]) -> list[DetectionResult]:
+        """Match each lead row/chunk first — location + product usually sit in the same block."""
+        blocks = [b.strip() for b in text.split("---") if b.strip()]
+        if len(blocks) <= 1:
+            return self.evaluate(text, keywords)
+        seen: set[str] = set()
+        merged: list[DetectionResult] = []
+        for block in blocks:
+            for result in self.evaluate(block, keywords):
+                if result.keyword_id in seen:
+                    continue
+                seen.add(result.keyword_id)
+                merged.append(result)
+        if not merged:
+            merged = self.evaluate(text, keywords)
+        merged.sort(key=lambda r: (r.priority, r.score), reverse=True)
+        return merged
+
     def evaluate(self, text: str, keywords: list[Any]) -> list[DetectionResult]:
         """
         Evaluates text against all active keywords.
@@ -107,6 +144,12 @@ class DetectionEngine:
             if not kw.is_active:
                 continue
             if self._cooldown.is_cooling_down(kw.id, kw.cooldown_seconds):
+                logger.debug(
+                    "Keyword on cooldown — skipped",
+                    job_id=self.job_id,
+                    keyword_id=kw.id,
+                    cooldown_seconds=kw.cooldown_seconds,
+                )
                 continue
 
             try:
@@ -115,6 +158,12 @@ class DetectionEngine:
                 for term in _keyword_search_terms(kw.value, kw.match_type):
                     pattern = self._get_pattern(kw, term)
                     match = pattern.search(text)
+                    if (
+                        not match
+                        and kw.match_type == MatchType.contains
+                        and not kw.case_sensitive
+                    ):
+                        match = self._flexible_contains(term, text, kw.case_sensitive)
                     if match:
                         matched_term = term
                         break
@@ -130,6 +179,7 @@ class DetectionEngine:
                                 job_id=self.job_id,
                                 keyword=matched_term,
                                 location_filter=kw.location_filter,
+                                text_sample=text_lower[:400],
                             )
                             continue
                     snippet = text[max(0, match.start() - 60): match.end() + 60]

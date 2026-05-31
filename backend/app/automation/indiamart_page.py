@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from playwright.async_api import Page
@@ -23,6 +24,17 @@ INQUIRY_ROW_SELECTORS = [
 ]
 
 INDIAMART_LEADS_URL = "https://seller.indiamart.com/bltxn/?pref=recent"
+
+LEAD_CARD_CLICK_SELECTORS = [
+    ".byr-inqry-item",
+    ".byr-inqry-list .byr-inqry-item",
+    ".inquiry-list-item",
+    ".lead-card",
+    "#leadList .lead-item",
+    ".msg-list-item",
+    "[class*='inqry']",
+    "table tbody tr",
+]
 
 PAGE_READY_SELECTORS = [
     ".byr-inqry-list",
@@ -80,6 +92,86 @@ async def scroll_lead_list(page: Page) -> None:
         )
     except Exception:
         pass
+
+
+async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEADS_URL) -> None:
+    """Force the recent-buy-leads list (SPA hash URLs are not enough)."""
+    target = INDIAMART_LEADS_URL
+    if "bltxn" in (fallback_url or "").lower():
+        target = fallback_url
+    try:
+        await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
+    except Exception:
+        pass
+    try:
+        await page.wait_for_timeout(2500)
+        await page.evaluate(
+            f"() => {{ window.location.assign({json.dumps(target)}); }}"
+        )
+        await page.wait_for_timeout(3500)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=20_000)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    await wait_for_page_ready(page)
+    await scroll_lead_list(page)
+
+
+async def open_first_lead_card(page: Page) -> bool:
+    """Open first visible lead so product title/location appear in DOM (like seller UI)."""
+    await scroll_lead_list(page)
+    for selector in LEAD_CARD_CLICK_SELECTORS:
+        try:
+            loc = page.locator(selector)
+            if await loc.count() == 0:
+                continue
+            await loc.first.click(timeout=8000)
+            await page.wait_for_timeout(3000)
+            return True
+        except Exception:
+            continue
+    try:
+        clicked = await page.evaluate(
+            """() => {
+              const hints = ['i am interested', 'buyer', 'requirement', 'mins ago', 'hrs ago'];
+              const nodes = [...document.querySelectorAll('div, li, tr, article, a, button')];
+              for (const el of nodes) {
+                const t = (el.innerText || '').trim().toLowerCase();
+                if (t.length < 8 || t.length > 400) continue;
+                if (hints.some(h => t.includes(h))) {
+                  el.click();
+                  return true;
+                }
+              }
+              return false;
+            }"""
+        )
+        if clicked:
+            await page.wait_for_timeout(3000)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def collect_indiamart_scan_text(page: Page, open_first_lead: bool = True) -> str:
+    """List page text + optional first-lead detail (matches what sellers see when clicking a lead)."""
+    parts: list[str] = []
+    list_text = await collect_inquiry_text(page)
+    if list_text:
+        parts.append(list_text)
+    if open_first_lead:
+        clicked = await open_first_lead_card(page)
+        if clicked:
+            try:
+                detail = await page.evaluate("() => document.body.innerText || ''")
+                if detail and len(detail) > 100:
+                    parts.append(detail)
+            except Exception:
+                pass
+    return "\n---\n".join(parts) if parts else ""
 
 
 async def collect_inquiry_text(page: Page) -> str:

@@ -12,8 +12,11 @@ from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_page import (
     INDIAMART_LEADS_URL,
     collect_inquiry_text,
+    ensure_bltxn_leads_page,
     is_indiamart_login_url,
     is_indiamart_seller_url,
+    open_first_lead_card,
+    scroll_lead_list,
     wait_for_page_ready,
 )
 from app.core.config import settings
@@ -183,16 +186,31 @@ class JobRunner:
             )
             return
 
-        # Run detection
-        results = self._detection.evaluate(page_text, keywords)
+        if is_indiamart_seller_url(job.target_url):
+            results = self._detection.evaluate_blocks(page_text, keywords)
+        else:
+            results = self._detection.evaluate(page_text, keywords)
+
+        if not results and is_indiamart_seller_url(job.target_url):
+            if await open_first_lead_card(page):
+                detail_text = await self._collect_page_text(page, job.target_url)
+                if detail_text.strip():
+                    page_text = f"{page_text}\n---\n{detail_text}"
+                    results = self._detection.evaluate_blocks(page_text, keywords)
 
         if not results:
+            text_lower = page_text.lower()
             logger.info(
                 "No keyword match this scan",
                 job_id=self.job_id,
                 text_chars=len(page_text),
                 keyword_count=len(keywords),
                 url=page.url,
+                probe_laser="laser" in text_lower,
+                probe_marking="marking" in text_lower,
+                probe_delhi="delhi" in text_lower,
+                probe_interested="interested" in text_lower,
+                probe_metal="metal" in text_lower,
             )
 
         if results:
@@ -279,10 +297,13 @@ class JobRunner:
             leads_url = INDIAMART_LEADS_URL
             if "bltxn" in target_lower or "pref=recent" in target_lower:
                 leads_url = job.target_url
-            inquiry_preview = await collect_inquiry_text(page)
-            needs_leads_page = len(inquiry_preview) < 80
-            if needs_leads_page or "succ_url" in current_lower:
-                await self._navigate_to_target(browser, leads_url)
+            await ensure_bltxn_leads_page(page, leads_url)
+            logger.info(
+                "IndiaMART page load",
+                job_id=self.job_id,
+                ready=True,
+                url=page.url,
+            )
             return
 
         if target_lower not in current_lower:
@@ -308,22 +329,35 @@ class JobRunner:
             return ""
 
         if is_indiamart_seller_url(target_url):
+            await scroll_lead_list(page)
             inquiry_text = await collect_inquiry_text(page)
             if inquiry_text:
-                return f"{body_text}\n---\n{inquiry_text}"
+                combined = f"{body_text}\n---\n{inquiry_text}"
+                if len(combined) > len(body_text) + 50:
+                    return combined
         return body_text
 
     async def _is_session_expired(self, page: Any, current_url: str) -> bool:
         """Returns True if the browser has been redirected to a login page."""
         if is_indiamart_login_url(current_url):
             return True
+        on_seller = is_indiamart_seller_url(current_url)
         for pattern in _LOGIN_URL_PATTERNS:
             if pattern in current_url:
+                if on_seller and "bltxn" in current_url:
+                    continue
                 return True
-        # Check page text for login wall messages
+        if on_seller and "seller.indiamart.com" in current_url:
+            return False
         try:
             page_text = await page.evaluate("() => (document.body.innerText || '').toLowerCase()")
-            for pattern in _LOGIN_PAGE_TEXT_PATTERNS:
+            strict_patterns = (
+                "session expired",
+                "your session has expired",
+                "log in to continue",
+                "sign in to continue",
+            )
+            for pattern in strict_patterns:
                 if pattern in page_text:
                     return True
         except Exception:
