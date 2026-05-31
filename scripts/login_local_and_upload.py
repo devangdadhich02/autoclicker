@@ -25,6 +25,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 META_FILENAME = ".velora_session_meta.json"
+COOKIES_FILENAME = ".velora_cookies.json"
 
 # Chrome cache — huge, not needed for login; causes "Permission denied" on server
 _SKIP_DIR_PARTS = frozenset(
@@ -486,6 +487,19 @@ async def run_local_login(
             "login_verified": login_ok,
         }
         write_session_meta(profile_dir, session_meta)
+
+        try:
+            cookies = await browser.cookies()
+            (profile_dir / COOKIES_FILENAME).write_text(
+                json.dumps(cookies, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            print(
+                f"  Exported {len(cookies)} portable cookies "
+                f"(for Linux server — required after upload)"
+            )
+        except Exception as exc:
+            print(f"  WARNING: Could not export portable cookies: {exc}")
 
         await browser.close()
 

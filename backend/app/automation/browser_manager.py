@@ -15,6 +15,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from app.automation.profile_cookies import load_portable_cookies
 from app.core.config import settings
 from app.core.exceptions import BrowserError
 from app.core.logging import get_logger
@@ -98,6 +99,7 @@ class BrowserManager:
             raise BrowserError(f"Failed to launch browser: {exc}") from exc
 
         await self._apply_stealth(self._context)
+        await self._inject_portable_cookies()
 
         pages = self._context.pages
         self._page = pages[0] if pages else await self._context.new_page()
@@ -111,6 +113,26 @@ class BrowserManager:
             headless=settings.BROWSER_HEADLESS,
         )
         return self._page
+
+    async def _inject_portable_cookies(self) -> None:
+        """Apply cookies exported from login.ps1 (Windows → Linux)."""
+        cookies = load_portable_cookies(self.profile_path)
+        if not cookies or self._context is None:
+            return
+        try:
+            await self._context.add_cookies(cookies)
+            logger.info(
+                "Portable IndiaMART cookies loaded",
+                job_id=self.job_id,
+                profile=self.profile_name,
+                count=len(cookies),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Portable cookie load failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
 
     async def _apply_stealth(self, context: BrowserContext) -> None:
         """Inject stealth scripts to avoid bot detection."""

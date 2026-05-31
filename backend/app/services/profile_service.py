@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.models.automation_job import AutomationJob
 
 META_FILENAME = ".velora_session_meta.json"
+COOKIES_JSON = ".velora_cookies.json"
 
 _COOKIE_PATHS = (
     "Default/Cookies",
@@ -111,6 +112,9 @@ def _inspect_profile_dir(profile_name: str, profile_dir: Path) -> BrowserProfile
     # UI shows only the latest upload metadata (written on each login.ps1 run), not old history
     login_verified = bool(meta.get("login_verified"))
     has_markers = _has_chromium_profile_markers(profile_dir)
+    has_portable = (profile_dir / COOKIES_JSON).is_file() and (
+        profile_dir / COOKIES_JSON
+    ).stat().st_size > 10
 
     if file_count == 0:
         status, msg = "missing", "No profile files on server. Run login.ps1 on your laptop."
@@ -123,6 +127,11 @@ def _inspect_profile_dir(profile_name: str, profile_dir: Path) -> BrowserProfile
         status, msg = (
             "incomplete",
             "Cookie database not found. Log in again via login.ps1, then press Refresh here.",
+        )
+    elif not has_portable:
+        status, msg = (
+            "incomplete",
+            "Re-run login.ps1 on laptop (needs cookie export for Linux server).",
         )
     else:
         status, msg = "ready", "IndiaMART login session is on the server and ready to use."

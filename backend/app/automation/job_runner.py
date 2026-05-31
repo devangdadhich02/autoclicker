@@ -18,6 +18,7 @@ from app.automation.indiamart_leads import (
     is_weak_match_context,
     lead_record_is_complete,
 )
+from app.automation.profile_cookies import load_portable_cookies
 from app.automation.indiamart_page import (
     INDIAMART_LEADS_URL,
     collect_inquiry_text,
@@ -225,18 +226,36 @@ class JobRunner:
         """Only real buyer inquiry rows — extract name/phone/message before counting a lead."""
         await self._heartbeat()
         if not await seller_session_is_authenticated(page):
-            try:
-                full = await page.evaluate("() => document.body.innerText || ''")
-            except Exception:
-                full = ""
-            logger.warning(
-                "IndiaMART cookies not active in browser — public page shown",
-                job_id=self.job_id,
-                url=page_url,
-                preview=full[:220],
-            )
-            await self._handle_session_expired(page_url)
-            return
+            portable = load_portable_cookies(browser.profile_path)
+            if portable:
+                try:
+                    await browser.restore_cookies(portable)
+                    leads_url = job.target_url
+                    if "bltxn" not in (leads_url or "").lower():
+                        leads_url = INDIAMART_LEADS_URL
+                    await ensure_bltxn_leads_page(page, leads_url)
+                    if await seller_session_is_authenticated(page):
+                        logger.info(
+                            "Session restored from portable cookies",
+                            job_id=self.job_id,
+                        )
+                    else:
+                        portable = []
+                except Exception:
+                    portable = []
+            if not portable or not await seller_session_is_authenticated(page):
+                try:
+                    full = await page.evaluate("() => document.body.innerText || ''")
+                except Exception:
+                    full = ""
+                logger.warning(
+                    "IndiaMART cookies not active in browser — public page shown",
+                    job_id=self.job_id,
+                    url=page.url,
+                    preview=full[:220],
+                )
+                await self._handle_session_expired(page.url)
+                return
         blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
             try:
@@ -464,7 +483,10 @@ class JobRunner:
         target_lower = job.target_url.lower()
 
         if not current_url or current_url == "about:blank":
-            await self._navigate_to_target(browser, job.target_url)
+            start_url = job.target_url
+            if is_indiamart_seller_url(start_url) and "bltxn" not in start_url.lower():
+                start_url = INDIAMART_LEADS_URL
+            await self._navigate_to_target(browser, start_url)
             return
 
         if is_indiamart_seller_url(target_lower):

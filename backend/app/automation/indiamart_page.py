@@ -246,18 +246,20 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         target = fallback_url
     for attempt in range(2):
         try:
-            await page.goto(
-                "https://seller.indiamart.com/",
-                wait_until="domcontentloaded",
-                timeout=60_000,
-            )
-            await page.wait_for_timeout(2000)
-        except Exception:
-            pass
-        try:
             await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
         except Exception:
             pass
+        if attempt == 1:
+            try:
+                await page.goto(
+                    "https://seller.indiamart.com/",
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+                await page.wait_for_timeout(2000)
+                await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
+            except Exception:
+                pass
         try:
             await page.wait_for_timeout(3000)
             if "#" not in (page.url or ""):
