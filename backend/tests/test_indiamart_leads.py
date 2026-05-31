@@ -4,6 +4,7 @@ from app.automation.indiamart_leads import (
     is_weak_match_context,
     lead_record_is_complete,
 )
+from app.automation.indiamart_page import is_indiamart_logged_out_body
 
 
 def test_rejects_parts_and_spares_nav():
@@ -72,3 +73,14 @@ def test_body_split_finds_laser_leads():
     blocks = _blocks_from_body_text(body)
     assert len(blocks) >= 2
     assert any("Laser Welding" in b.text for b in blocks)
+
+
+def test_detects_logged_out_seller_landing():
+    body = (
+        "IndiaMART\nBuy Leads\nHelp\nSign In\nSell on IndiaMART\n"
+        "How to Register\nSuccess Stories\nWhat can you sell"
+    )
+    assert is_indiamart_logged_out_body(body)
+    assert not is_indiamart_logged_out_body(
+        "Laser Welding Machine\n4 mins ago\nKheda, Gujarat\nSold Out!"
+    )

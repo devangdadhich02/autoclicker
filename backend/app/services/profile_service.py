@@ -61,13 +61,37 @@ def _read_meta(profile_dir: Path) -> dict:
         return {}
 
 
+_PROFILE_SKIP_PARTS = frozenset(
+    {"Code Cache", "GPUCache", "ShaderCache", "GrShaderCache", "Cache", "blob_storage"}
+)
+
+
+def _profile_files(profile_dir: Path) -> list[Path]:
+    out: list[Path] = []
+    for f in profile_dir.rglob("*"):
+        if not f.is_file():
+            continue
+        if any(part in _PROFILE_SKIP_PARTS for part in f.parts):
+            continue
+        out.append(f)
+    return out
+
+
 def _inspect_profile_dir(profile_name: str, profile_dir: Path) -> BrowserProfileStatus:
-    files = [f for f in profile_dir.rglob("*") if f.is_file()]
+    files = _profile_files(profile_dir)
     file_count = len(files)
-    size_bytes = sum(f.stat().st_size for f in files)
+    size_bytes = 0
+    mtimes: list[float] = []
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        size_bytes += st.st_size
+        mtimes.append(st.st_mtime)
     last_modified_at: datetime | None = None
-    if files:
-        latest = max(f.stat().st_mtime for f in files)
+    if mtimes:
+        latest = max(mtimes)
         last_modified_at = datetime.fromtimestamp(latest, tz=UTC)
 
     cookies_file = _find_cookies_file(profile_dir)

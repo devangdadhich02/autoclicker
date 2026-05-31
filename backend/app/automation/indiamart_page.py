@@ -67,6 +67,29 @@ def is_indiamart_login_url(url: str) -> bool:
     )
 
 
+_TIME_AGO_RE = re.compile(
+    r"\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago",
+    re.IGNORECASE,
+)
+_LOGGED_OUT_MARKERS = (
+    "sign in",
+    "sell on indiamart",
+    "how to register",
+    "success stories",
+    "what can you sell",
+)
+
+
+def is_indiamart_logged_out_body(text: str) -> bool:
+    """True when page text is the public seller landing, not the logged-in leads feed."""
+    snippet = (text or "")[:900].lower()
+    if not snippet:
+        return False
+    if _TIME_AGO_RE.search(snippet):
+        return False
+    return sum(1 for m in _LOGGED_OUT_MARKERS if m in snippet) >= 2
+
+
 async def wait_for_page_ready(page: Page, timeout_ms: int = 45_000) -> bool:
     """Wait until inquiry/list UI or a generous timeout elapses."""
     per_selector = max(3_000, timeout_ms // len(PAGE_READY_SELECTORS))

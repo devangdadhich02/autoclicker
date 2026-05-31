@@ -22,6 +22,7 @@ from app.automation.indiamart_page import (
     INDIAMART_LEADS_URL,
     collect_inquiry_text,
     ensure_bltxn_leads_page,
+    is_indiamart_logged_out_body,
     is_indiamart_login_url,
     is_indiamart_seller_url,
     scroll_lead_list,
@@ -221,6 +222,7 @@ class JobRunner:
         page_url: str,
     ) -> None:
         """Only real buyer inquiry rows — extract name/phone/message before counting a lead."""
+        await self._heartbeat()
         blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
             try:
@@ -241,9 +243,11 @@ class JobRunner:
                 pass
         if not blocks:
             diag = ""
+            snippet = ""
+            has_ago = False
             try:
                 snippet = await page.evaluate(
-                    "() => (document.body.innerText || '').slice(0, 400)"
+                    "() => (document.body.innerText || '').slice(0, 900)"
                 )
                 has_ago = bool(
                     re.search(
@@ -261,6 +265,9 @@ class JobRunner:
                 url=page_url,
                 diagnostic=diag,
             )
+            if is_indiamart_logged_out_body(snippet):
+                await self._handle_session_expired(page_url)
+                return
             await self._log_event(
                 "scan_no_inquiry_rows",
                 "IndiaMART recent leads list empty or layout changed. Open bltxn manually to verify."
@@ -449,6 +456,7 @@ class JobRunner:
             if "bltxn" in target_lower or "pref=recent" in target_lower:
                 leads_url = job.target_url
             await ensure_bltxn_leads_page(page, leads_url)
+            await self._heartbeat()
             logger.info(
                 "IndiaMART page load",
                 job_id=self.job_id,
@@ -488,6 +496,16 @@ class JobRunner:
                     return combined
         return body_text
 
+    async def _is_indiamart_public_page(self, page: Any) -> bool:
+        """Seller URL but marketing/login chrome — no recent-leads feed (logged out)."""
+        try:
+            snippet = await page.evaluate(
+                "() => (document.body.innerText || '').slice(0, 900)"
+            )
+        except Exception:
+            return False
+        return is_indiamart_logged_out_body(snippet)
+
     async def _is_session_expired(self, page: Any, current_url: str) -> bool:
         """Returns True if the browser has been redirected to a login page."""
         if is_indiamart_login_url(current_url):
@@ -498,6 +516,8 @@ class JobRunner:
                 if on_seller and "bltxn" in current_url:
                     continue
                 return True
+        if on_seller and await self._is_indiamart_public_page(page):
+            return True
         if on_seller and "seller.indiamart.com" in current_url:
             return False
         try:

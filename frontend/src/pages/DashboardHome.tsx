@@ -49,15 +49,19 @@ export default function DashboardHome() {
   const [session, setSession] = useState<BrowserProfileStatus | null>(null)
   const [wsLive, setWsLive] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const wsBackoffRef = useRef(1000)
+  const wsUnmountRef = useRef(false)
 
   useEffect(() => {
+    wsUnmountRef.current = false
     fetchData()
     connectWs()
     return () => {
+      wsUnmountRef.current = true
       wsRef.current?.close()
       wsRef.current = null
     }
-  }, [accessToken])
+  }, [])
 
   async function refreshAccessToken(): Promise<string | null> {
     const refreshToken = useAuthStore.getState().refreshToken
@@ -100,15 +104,31 @@ export default function DashboardHome() {
     const ws = new WebSocket(`${proto}://${host}/api/v1/ws/dashboard?token=${token}`)
     wsRef.current = ws
 
-    ws.onopen = () => setWsLive(true)
-    ws.onclose = async () => {
+    ws.onopen = () => {
+      setWsLive(true)
+      wsBackoffRef.current = 1000
+    }
+    ws.onclose = async (ev) => {
       setWsLive(false)
-      const fresh = await refreshAccessToken()
-      if (fresh) {
-        setTimeout(connectWs, 1000)
+      if (wsUnmountRef.current) return
+      let nextToken = useAuthStore.getState().accessToken
+      if (ev.code === 4001) {
+        nextToken = await refreshAccessToken()
+        if (!nextToken) return
+      }
+      const delay = wsBackoffRef.current
+      wsBackoffRef.current = Math.min(delay * 2, 30_000)
+      setTimeout(() => {
+        if (!wsUnmountRef.current) connectWs()
+      }, delay)
+    }
+    ws.onerror = () => {
+      try {
+        ws.close()
+      } catch {
+        /* ignore */
       }
     }
-    ws.onerror = () => ws.close()
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
       if (msg.type === 'dashboard_update') {

@@ -26,11 +26,22 @@ class ConnectionManager:
         self._connections: dict[str, WebSocket] = {}
 
     async def connect(self, client_id: str, websocket: WebSocket) -> None:
+        old = self._connections.pop(client_id, None)
+        if old is not None:
+            try:
+                await old.close(code=1000, reason="Replaced by new connection")
+            except Exception:
+                pass
         await websocket.accept()
         self._connections[client_id] = websocket
         logger.info("WebSocket connected", client_id=client_id)
 
-    def disconnect(self, client_id: str) -> None:
+    def disconnect(self, client_id: str, websocket: WebSocket | None = None) -> None:
+        current = self._connections.get(client_id)
+        if current is None:
+            return
+        if websocket is not None and current is not websocket:
+            return
         self._connections.pop(client_id, None)
         logger.info("WebSocket disconnected", client_id=client_id)
 
@@ -130,10 +141,10 @@ async def websocket_dashboard(websocket: WebSocket) -> None:
                 pass
 
     except WebSocketDisconnect:
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, websocket)
     except Exception as exc:
         logger.error("WebSocket error", client_id=client_id, error=str(exc))
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, websocket)
 
 
 @router.websocket("/job/{job_id}")
@@ -192,7 +203,7 @@ async def websocket_job(websocket: WebSocket, job_id: str) -> None:
                 pass
 
     except WebSocketDisconnect:
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, websocket)
     except Exception as exc:
         logger.error("Job WebSocket error", client_id=client_id, job_id=job_id, error=str(exc))
-        manager.disconnect(client_id)
+        manager.disconnect(client_id, websocket)
