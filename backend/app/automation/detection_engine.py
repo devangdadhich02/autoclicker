@@ -23,6 +23,21 @@ class KeywordLike(Protocol):
 
 logger = get_logger(__name__)
 
+_GENERIC_MATCH_WORDS = frozenset(
+    {
+        "metal",
+        "machine",
+        "steel",
+        "pipe",
+        "parts",
+        "spares",
+        "product",
+        "products",
+        "industrial",
+        "equipment",
+    }
+)
+
 
 @dataclass
 class DetectionResult:
@@ -107,12 +122,13 @@ class DetectionEngine:
         if t in body:
             return re.search(re.escape(term), text, flags)
         words = [w for w in re.findall(r"[a-z0-9]+", t) if len(w) >= 3]
-        if len(words) >= 2:
-            hits = [w for w in words if w in body]
+        specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
+        if len(specific) >= 2:
+            hits = [w for w in specific if w in body]
             if len(hits) >= 2:
                 return re.search(re.escape(hits[0]), text, flags)
-        if len(words) == 1 and words[0] in body:
-            return re.search(re.escape(words[0]), text, flags)
+        if len(specific) == 1 and specific[0] in body:
+            return re.search(re.escape(specific[0]), text, flags)
         return None
 
     def evaluate_blocks(self, text: str, keywords: list[Any]) -> list[DetectionResult]:

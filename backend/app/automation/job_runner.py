@@ -9,13 +9,20 @@ from typing import Any
 from app.automation.action_engine import ActionEngine
 from app.automation.browser_manager import BrowserManager
 from app.automation.detection_engine import DetectionEngine
+from app.automation.indiamart_leads import (
+    BuyerLeadBlock,
+    click_buyer_lead_block,
+    collect_buyer_lead_blocks,
+    extract_buyer_details,
+    is_weak_match_context,
+    lead_record_is_complete,
+)
 from app.automation.indiamart_page import (
     INDIAMART_LEADS_URL,
     collect_inquiry_text,
     ensure_bltxn_leads_page,
     is_indiamart_login_url,
     is_indiamart_seller_url,
-    open_first_lead_card,
     scroll_lead_list,
     wait_for_page_ready,
 )
@@ -176,101 +183,202 @@ class JobRunner:
             )
             return
 
-        page_text = await self._collect_page_text(page, job.target_url)
-        if not page_text.strip():
-            logger.warning("Empty page text after load", job_id=self.job_id, url=page.url)
-            await self._log_event(
-                "scan_empty",
-                "Could not read lead text from the page. IndiaMART layout may have changed.",
-                EventSeverity.warning,
+        page_url = page.url
+        if is_indiamart_seller_url(job.target_url):
+            await self._process_indiamart_leads(
+                page, job, keywords, action_rules, browser, page_url
             )
             return
 
-        if is_indiamart_seller_url(job.target_url):
-            results = self._detection.evaluate_blocks(page_text, keywords)
-        else:
-            results = self._detection.evaluate(page_text, keywords)
+        page_text = await self._collect_page_text(page, job.target_url)
+        if not page_text.strip():
+            logger.warning("Empty page text after load", job_id=self.job_id, url=page.url)
+            return
 
-        if not results and is_indiamart_seller_url(job.target_url):
-            if await open_first_lead_card(page):
-                detail_text = await self._collect_page_text(page, job.target_url)
-                if detail_text.strip():
-                    page_text = f"{page_text}\n---\n{detail_text}"
-                    results = self._detection.evaluate_blocks(page_text, keywords)
-
+        results = self._detection.evaluate(page_text, keywords)
         if not results:
-            text_lower = page_text.lower()
             logger.info(
                 "No keyword match this scan",
                 job_id=self.job_id,
                 text_chars=len(page_text),
                 keyword_count=len(keywords),
                 url=page.url,
-                probe_laser="laser" in text_lower,
-                probe_marking="marking" in text_lower,
-                probe_delhi="delhi" in text_lower,
-                probe_interested="interested" in text_lower,
-                probe_metal="metal" in text_lower,
             )
+            return
 
-        if results:
+        await self._handle_detection_results(
+            results, job, browser, action_rules, page_url, page_text[:500]
+        )
+
+    async def _process_indiamart_leads(
+        self,
+        page: Any,
+        job: AutomationJob,
+        keywords: list[Keyword],
+        action_rules: list[ActionRule],
+        browser: BrowserManager,
+        page_url: str,
+    ) -> None:
+        """Only real buyer inquiry rows — extract name/phone/message before counting a lead."""
+        blocks = await collect_buyer_lead_blocks(page)
+        if not blocks:
             logger.info(
-                "Keywords detected",
+                "No buyer inquiry rows on page",
                 job_id=self.job_id,
-                count=len(results),
-                top=results[0].keyword_value,
+                url=page_url,
             )
-            page_url = page.url
-            action_engine = ActionEngine(self.job_id, browser)
-            has_open_inquiry = any(
-                r.action_type == ActionType.open_inquiry for r in action_rules
+            await self._log_event(
+                "scan_no_inquiry_rows",
+                "IndiaMART recent leads list empty or layout changed. Open bltxn manually to verify.",
+                EventSeverity.warning,
             )
+            return
 
-            for result in results:
-                await self._log_event(
-                    "keyword_detected",
-                    f"Keyword '{result.keyword_value}' matched: {result.context_snippet[:200]}",
-                    EventSeverity.info,
-                    keyword_matched=result.keyword_value,
-                    details={
-                        "keyword": result.keyword_value,
-                        "context_snippet": result.context_snippet[:500],
-                        "page_url": page_url,
-                    },
-                    job_name=job.name,
-                    page_url=page_url,
-                )
-                await self._increment_lead()
-
-            # IndiaMART: auto-open inquiry for buyer phone/email in CSV
-            if is_indiamart_seller_url(job.target_url) and not has_open_inquiry:
-                lead = await action_engine.extract_latest_inquiry()
-                if lead:
-                    msg = (
-                        f"Lead extracted — "
-                        f"Name: {lead.get('buyer_name', 'N/A')} | "
-                        f"Phone: {lead.get('buyer_phone', 'N/A')}"
-                    )
-                    await action_engine._save_lead_event(
-                        event_type="lead_extracted",
-                        message=msg,
-                        details=json.dumps(lead),
-                        keyword_matched=results[0].keyword_value,
-                        job_name=job.name,
-                        page_url=page_url,
-                    )
-
-            # Execute action chain
-            if action_rules:
-                exec_results = await action_engine.execute_chain(action_rules)
-                success_count = sum(exec_results)
-                await self._increment_action(success_count)
+        best: tuple[BuyerLeadBlock, Any] | None = None
+        for block in blocks:
+            block_results = self._detection.evaluate(block.text, keywords)
+            if not block_results:
+                continue
+            result = block_results[0]
+            if is_weak_match_context(result.context_snippet, result.keyword_value):
                 logger.info(
-                    "Actions executed",
+                    "Keyword hit ignored (nav/catalog text)",
                     job_id=self.job_id,
-                    success=success_count,
-                    total=len(exec_results),
+                    keyword=result.keyword_value,
+                    snippet=result.context_snippet[:120],
                 )
+                continue
+            if best is None or (result.priority, result.score) > (
+                best[1].priority,
+                best[1].score,
+            ):
+                best = (block, result)
+
+        if not best:
+            logger.info(
+                "No keyword match in buyer rows",
+                job_id=self.job_id,
+                buyer_rows=len(blocks),
+                keyword_count=len(keywords),
+                url=page_url,
+            )
+            return
+
+        block, result = best
+        if not await click_buyer_lead_block(page, block):
+            logger.warning(
+                "Could not open matched buyer row",
+                job_id=self.job_id,
+                keyword=result.keyword_value,
+            )
+            return
+
+        lead = await extract_buyer_details(page, block.text)
+        if not lead_record_is_complete(block.text, lead):
+            logger.warning(
+                "Matched row rejected — not a complete buyer lead",
+                job_id=self.job_id,
+                keyword=result.keyword_value,
+                block_preview=block.text[:200],
+                has_phone=bool(lead.get("buyer_phone")),
+                has_name=bool(lead.get("buyer_name")),
+            )
+            await self._log_event(
+                "lead_rejected",
+                f"Keyword '{result.keyword_value}' matched page text but buyer details missing.",
+                EventSeverity.warning,
+                keyword_matched=result.keyword_value,
+                details={
+                    "block_preview": block.text[:500],
+                    "extracted": lead,
+                },
+                job_name=job.name,
+                page_url=page_url,
+            )
+            return
+
+        details = {
+            **lead,
+            "keyword": result.keyword_value,
+            "context_snippet": block.text[:500],
+            "page_url": page_url,
+        }
+        msg = (
+            f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
+            f"{lead.get('buyer_location', '')} | "
+            f"Phone: {lead.get('buyer_phone', 'N/A')} | "
+            f"Name: {lead.get('buyer_name', 'N/A')}"
+        )
+        logger.info(
+            "Real buyer lead captured",
+            job_id=self.job_id,
+            keyword=result.keyword_value,
+            phone=lead.get("buyer_phone"),
+            product=lead.get("product_title"),
+        )
+        await self._log_event(
+            "keyword_detected",
+            msg,
+            EventSeverity.info,
+            keyword_matched=result.keyword_value,
+            details=details,
+            job_name=job.name,
+            page_url=page_url,
+        )
+        await self._increment_lead()
+        await self._log_event(
+            "lead_extracted",
+            msg,
+            EventSeverity.info,
+            keyword_matched=result.keyword_value,
+            details=details,
+            job_name=job.name,
+            page_url=page_url,
+        )
+
+        if action_rules:
+            action_engine = ActionEngine(self.job_id, browser)
+            action_engine._last_lead_data = lead
+            exec_results = await action_engine.execute_chain(action_rules)
+            success_count = sum(exec_results)
+            await self._increment_action(success_count)
+
+    async def _handle_detection_results(
+        self,
+        results: list[Any],
+        job: AutomationJob,
+        browser: BrowserManager,
+        action_rules: list[ActionRule],
+        page_url: str,
+        context_snippet: str,
+    ) -> None:
+        logger.info(
+            "Keywords detected",
+            job_id=self.job_id,
+            count=len(results),
+            top=results[0].keyword_value,
+        )
+        for result in results:
+            await self._log_event(
+                "keyword_detected",
+                f"Keyword '{result.keyword_value}' matched: {result.context_snippet[:200]}",
+                EventSeverity.info,
+                keyword_matched=result.keyword_value,
+                details={
+                    "keyword": result.keyword_value,
+                    "context_snippet": context_snippet,
+                    "page_url": page_url,
+                },
+                job_name=job.name,
+                page_url=page_url,
+            )
+            await self._increment_lead()
+
+        if action_rules:
+            action_engine = ActionEngine(self.job_id, browser)
+            exec_results = await action_engine.execute_chain(action_rules)
+            success_count = sum(exec_results)
+            await self._increment_action(success_count)
 
     async def _ensure_on_target_page(
         self,
