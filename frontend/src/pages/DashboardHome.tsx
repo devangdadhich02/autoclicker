@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Activity, TrendingUp, AlertTriangle, Play, Zap, RefreshCw, Cookie, ChevronRight } from 'lucide-react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
+import axios from 'axios'
 import { api } from '../lib/api'
 import { useAuthStore } from '../store/authStore'
 import type { AnalyticsSummary, BrowserProfileStatus, EventLog } from '../types'
@@ -52,8 +53,27 @@ export default function DashboardHome() {
   useEffect(() => {
     fetchData()
     connectWs()
-    return () => wsRef.current?.close()
-  }, [])
+    return () => {
+      wsRef.current?.close()
+      wsRef.current = null
+    }
+  }, [accessToken])
+
+  async function refreshAccessToken(): Promise<string | null> {
+    const refreshToken = useAuthStore.getState().refreshToken
+    if (!refreshToken) return null
+    try {
+      const { data } = await axios.post(`${import.meta.env.VITE_API_URL || '/api/v1'}/auth/refresh`, {
+        refresh_token: refreshToken,
+      })
+      useAuthStore.getState().setTokens(data.access_token, data.refresh_token)
+      return data.access_token as string
+    } catch {
+      useAuthStore.getState().logout()
+      window.location.href = '/login'
+      return null
+    }
+  }
 
   async function fetchData() {
     try {
@@ -69,14 +89,25 @@ export default function DashboardHome() {
   }
 
   function connectWs() {
-    if (!accessToken) return
+    const token = useAuthStore.getState().accessToken
+    if (!token) return
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const host = window.location.host
-    const ws = new WebSocket(`${proto}://${host}/api/v1/ws/dashboard?token=${accessToken}`)
+    const ws = new WebSocket(`${proto}://${host}/api/v1/ws/dashboard?token=${token}`)
     wsRef.current = ws
 
     ws.onopen = () => setWsLive(true)
-    ws.onclose = () => { setWsLive(false); setTimeout(connectWs, 5000) }
+    ws.onclose = async () => {
+      setWsLive(false)
+      const fresh = await refreshAccessToken()
+      if (fresh) {
+        setTimeout(connectWs, 1000)
+      }
+    }
     ws.onerror = () => ws.close()
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)

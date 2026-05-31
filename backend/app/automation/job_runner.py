@@ -10,6 +10,7 @@ from app.automation.action_engine import ActionEngine
 from app.automation.browser_manager import BrowserManager
 from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_page import (
+    INDIAMART_LEADS_URL,
     collect_inquiry_text,
     is_indiamart_login_url,
     is_indiamart_seller_url,
@@ -175,10 +176,24 @@ class JobRunner:
         page_text = await self._collect_page_text(page, job.target_url)
         if not page_text.strip():
             logger.warning("Empty page text after load", job_id=self.job_id, url=page.url)
+            await self._log_event(
+                "scan_empty",
+                "Could not read lead text from the page. IndiaMART layout may have changed.",
+                EventSeverity.warning,
+            )
             return
 
         # Run detection
         results = self._detection.evaluate(page_text, keywords)
+
+        if not results:
+            logger.info(
+                "No keyword match this scan",
+                job_id=self.job_id,
+                text_chars=len(page_text),
+                keyword_count=len(keywords),
+                url=page.url,
+            )
 
         if results:
             logger.info(
@@ -261,12 +276,14 @@ class JobRunner:
         if is_indiamart_seller_url(target_lower):
             if is_indiamart_login_url(current_lower):
                 return
-            if is_indiamart_seller_url(current_lower):
-                # Re-open leads page if target is bltxn/messagebox but browser is elsewhere
-                if any(p in target_lower for p in ("bltxn", "messagebox", "lead")):
-                    if not any(p in current_lower for p in ("bltxn", "messagebox", "lead")):
-                        await self._navigate_to_target(browser, job.target_url)
-                return
+            leads_url = INDIAMART_LEADS_URL
+            if "bltxn" in target_lower or "pref=recent" in target_lower:
+                leads_url = job.target_url
+            inquiry_preview = await collect_inquiry_text(page)
+            needs_leads_page = len(inquiry_preview) < 80
+            if needs_leads_page or "succ_url" in current_lower:
+                await self._navigate_to_target(browser, leads_url)
+            return
 
         if target_lower not in current_lower:
             await self._navigate_to_target(browser, job.target_url)

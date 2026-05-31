@@ -54,6 +54,17 @@ class CooldownTracker:
         self._timestamps.pop(keyword_id, None)
 
 
+def _keyword_search_terms(value: str, match_type: MatchType) -> list[str]:
+    """
+    Dashboard often stores several products in one field separated by commas.
+    Treat each segment as OR (any one match counts) for non-regex types.
+    """
+    if match_type == MatchType.regex:
+        return [value]
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    return parts if len(parts) > 1 else [value]
+
+
 class DetectionEngine:
     """
     Evaluates page content against configured keyword rules.
@@ -66,23 +77,24 @@ class DetectionEngine:
         self._cooldown = CooldownTracker()
         self._compiled_patterns: dict[str, re.Pattern[str]] = {}
 
-    def _get_pattern(self, keyword: Any) -> re.Pattern[str]:
-        if keyword.id not in self._compiled_patterns:
+    def _get_pattern(self, keyword: Any, term: str) -> re.Pattern[str]:
+        cache_key = f"{keyword.id}:{term}"
+        if cache_key not in self._compiled_patterns:
             flags = 0 if keyword.case_sensitive else re.IGNORECASE
             if keyword.match_type == MatchType.regex:
-                pattern = re.compile(keyword.value, flags)
+                pattern = re.compile(term, flags)
             elif keyword.match_type == MatchType.exact:
-                pattern = re.compile(r"(?<!\w)" + re.escape(keyword.value) + r"(?!\w)", flags)
+                pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", flags)
             elif keyword.match_type == MatchType.contains:
-                pattern = re.compile(re.escape(keyword.value), flags)
+                pattern = re.compile(re.escape(term), flags)
             elif keyword.match_type == MatchType.starts_with:
-                pattern = re.compile(r"^" + re.escape(keyword.value), flags | re.MULTILINE)
+                pattern = re.compile(r"^" + re.escape(term), flags | re.MULTILINE)
             elif keyword.match_type == MatchType.ends_with:
-                pattern = re.compile(re.escape(keyword.value) + r"$", flags | re.MULTILINE)
+                pattern = re.compile(re.escape(term) + r"$", flags | re.MULTILINE)
             else:
-                pattern = re.compile(re.escape(keyword.value), flags)
-            self._compiled_patterns[keyword.id] = pattern
-        return self._compiled_patterns[keyword.id]
+                pattern = re.compile(re.escape(term), flags)
+            self._compiled_patterns[cache_key] = pattern
+        return self._compiled_patterns[cache_key]
 
     def evaluate(self, text: str, keywords: list[Any]) -> list[DetectionResult]:
         """
@@ -98,31 +110,33 @@ class DetectionEngine:
                 continue
 
             try:
-                pattern = self._get_pattern(kw)
-                match = pattern.search(text)
-                if match:
-                    # ── Location Filter Check ─────────────────────────────────────
+                match = None
+                matched_term: str | None = None
+                for term in _keyword_search_terms(kw.value, kw.match_type):
+                    pattern = self._get_pattern(kw, term)
+                    match = pattern.search(text)
+                    if match:
+                        matched_term = term
+                        break
+                if match and matched_term:
                     if kw.location_filter:
                         loc_lower = kw.location_filter.lower()
                         text_lower = text.lower()
-                        # Check if any of the comma-separated locations match
                         locations = [l.strip() for l in loc_lower.split(",") if l.strip()]
                         location_found = any(loc in text_lower for loc in locations)
                         if not location_found:
-                            # Keyword matched but location didn't match — skip
-                            logger.debug(
-                                "Keyword matched but location filter failed",
+                            logger.info(
+                                "Product matched but location filter did not — lead skipped",
                                 job_id=self.job_id,
-                                keyword=kw.value,
+                                keyword=matched_term,
                                 location_filter=kw.location_filter,
                             )
                             continue
-                    # ─────────────────────────────────────────────────────────────
                     snippet = text[max(0, match.start() - 60): match.end() + 60]
                     result = DetectionResult(
                         matched=True,
                         keyword_id=kw.id,
-                        keyword_value=kw.value,
+                        keyword_value=matched_term,
                         match_type=kw.match_type,
                         score=kw.score,
                         priority=kw.priority,
@@ -131,10 +145,10 @@ class DetectionEngine:
                     )
                     results.append(result)
                     self._cooldown.record_match(kw.id)
-                    logger.debug(
+                    logger.info(
                         "Keyword matched",
                         job_id=self.job_id,
-                        keyword=kw.value,
+                        keyword=matched_term,
                         match_type=kw.match_type,
                     )
             except re.error as exc:
