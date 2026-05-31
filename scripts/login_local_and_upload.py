@@ -270,6 +270,60 @@ def _upload_via_docker_cp(
     return False, inner_dir, 0
 
 
+def upload_portable_cookies_only(
+    cookies_path: Path,
+    server_ip: str,
+    ssh_user: str,
+    ssh_pass: str,
+    profile_name: str,
+    session_meta: dict | None = None,
+    compose_dir: str | None = None,
+) -> tuple[bool, str]:
+    """Push .velora_cookies.json only — no full profile re-upload, no re-login."""
+    try:
+        import paramiko
+    except ImportError:
+        print("ERROR: paramiko not installed. Run: pip install paramiko")
+        return False, ""
+
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(server_ip, username=ssh_user, password=ssh_pass)
+
+        compose = compose_dir or _detect_compose_dir(ssh)
+        bind_base = _host_bind_profile_dir(ssh, compose)
+        host_profile_dir = f"{bind_base}/{profile_name}"
+        _ssh_exec(ssh, f"sudo mkdir -p {host_profile_dir}")
+        _ssh_exec(
+            ssh,
+            f"sudo chown -R {ssh_user}:{ssh_user} {bind_base} 2>/dev/null || true",
+        )
+
+        remote_cookies = f"{host_profile_dir}/{COOKIES_FILENAME}"
+        sftp = ssh.open_sftp()
+        sftp.put(str(cookies_path), remote_cookies)
+        sftp.close()
+
+        if session_meta:
+            _put_meta_sftp(ssh, host_profile_dir, session_meta)
+
+        container = _detect_backend_container(ssh)
+        if container:
+            inner = f"/data/browser_profiles/{profile_name}/{COOKIES_FILENAME}"
+            host_tmp = f"/tmp/{profile_name}_{COOKIES_FILENAME}"
+            for docker_bin in ("docker", "sudo docker"):
+                _ssh_exec(ssh, f"{docker_bin} cp {remote_cookies} {container}:{inner} 2>/dev/null")
+
+        ssh.close()
+        print(f"  Synced portable cookies → {remote_cookies}")
+        print("  (Your earlier login is kept — this file makes Linux server use it.)")
+        return True, host_profile_dir
+    except Exception as e:
+        print(f"Cookie sync failed: {e}")
+        return False, ""
+
+
 def upload_to_server(
     zip_path: Path,
     server_ip: str,
@@ -382,6 +436,93 @@ def upload_to_server(
         return False, "", 0
 
 
+async def run_sync_cookies_only(
+    profile_name: str,
+    url: str,
+    server_ip: str,
+    ssh_user: str,
+    ssh_pass: str | None,
+    compose_dir: str | None = None,
+) -> None:
+    """Re-use saved laptop login — export cookies and sync to server (no manual login)."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        print("ERROR: pip install playwright && playwright install chromium")
+        sys.exit(1)
+
+    profile_dir = Path.home() / ".velora_profiles" / profile_name
+    if not profile_dir.is_dir():
+        print(f"ERROR: No saved session at {profile_dir}")
+        print("  Run full login.ps1 once first.")
+        sys.exit(1)
+
+    print(f"\n{'='*60}")
+    print("  Velora — Sync cookies only (no re-login)")
+    print(f"{'='*60}")
+    print(f"  Using saved profile: {profile_dir}")
+    print(f"  Server: {server_ip}\n")
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch_persistent_context(
+            user_data_dir=str(profile_dir),
+            headless=False,
+            args=["--no-sandbox"],
+            viewport={"width": 1280, "height": 800},
+        )
+        page = browser.pages[0] if browser.pages else await browser.new_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        await page.wait_for_timeout(3000)
+        body = await page.evaluate("() => (document.body.innerText || '').slice(0, 4000)")
+        has_feed = bool(
+            re.search(
+                r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
+                body or "",
+                re.I,
+            )
+        )
+        if not has_feed and "sign in" in (body or "").lower():
+            print(
+                "  ERROR: Saved session expired on this PC. Run full login.ps1 once."
+            )
+            await browser.close()
+            sys.exit(1)
+        cookies = await browser.cookies()
+        (profile_dir / COOKIES_FILENAME).write_text(
+            json.dumps(cookies, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"  Exported {len(cookies)} cookies from saved session.")
+        await browser.close()
+
+    if not ssh_pass:
+        ssh_pass = input(f"  Enter SSH password for {ssh_user}@{server_ip}: ")
+
+    session_meta = {
+        "profile_name": profile_name,
+        "uploaded_at": datetime.now(UTC).isoformat(),
+        "login_url": url,
+        "uploaded_from": "cookies_only_sync",
+        "login_verified": True,
+    }
+    write_session_meta(profile_dir, session_meta)
+
+    ok, _ = upload_portable_cookies_only(
+        profile_dir / COOKIES_FILENAME,
+        server_ip,
+        ssh_user,
+        ssh_pass,
+        profile_name,
+        session_meta,
+        compose_dir=compose_dir,
+    )
+    if ok:
+        print("\n  SUCCESS — cookies synced. Server must have latest backend (rebuild once).")
+        print("  Dashboard → STOP job → Refresh Seller Session → START job.")
+    else:
+        sys.exit(1)
+
+
 async def run_local_login(
     profile_name: str,
     url: str,
@@ -390,7 +531,13 @@ async def run_local_login(
     ssh_pass: str | None,
     timeout_seconds: int = 300,
     compose_dir: str | None = None,
+    cookies_only: bool = False,
 ) -> None:
+    if cookies_only:
+        await run_sync_cookies_only(
+            profile_name, url, server_ip, ssh_user, ssh_pass, compose_dir
+        )
+        return
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -583,6 +730,11 @@ def main() -> None:
         default=300,
         help="Seconds to wait for login. Default: 300 (5 minutes)",
     )
+    parser.add_argument(
+        "--cookies-only",
+        action="store_true",
+        help="Use saved laptop login — sync cookies only, no manual login again",
+    )
     args = parser.parse_args()
 
     asyncio.run(
@@ -594,6 +746,7 @@ def main() -> None:
             args.password,
             args.timeout,
             args.compose_dir,
+            args.cookies_only,
         )
     )
 

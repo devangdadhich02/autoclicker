@@ -6,7 +6,8 @@ param(
     [string]$Server = "68.178.160.47",
     [string]$User = "autoclicker",
     [string]$Profile = "indiamart",
-    [string]$Url = "https://seller.indiamart.com/bltxn/?pref=recent"
+    [string]$Url = "https://seller.indiamart.com/bltxn/?pref=recent",
+    [switch]$CookiesOnly
 )
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -65,13 +66,17 @@ Write-Host "Installing dependencies (one-time)..." -ForegroundColor Yellow
 & $pythonCmd -m pip install playwright paramiko -q 2>$null
 & $pythonCmd -m playwright install chromium 2>$null
 
-Write-Host ""
-Write-Host "Starting Chrome... Please login to IndiaMART when it opens." -ForegroundColor Green
-Write-Host "After login, come back here and press ENTER to upload." -ForegroundColor Green
-Write-Host ""
-
-# Run the script (uploads into Docker volume on server)
-& $pythonCmd $scriptFile --server $Server --user $User --profile $Profile --url $Url
+if ($CookiesOnly) {
+    Write-Host "Syncing cookies from SAVED login (no IndiaMART login again)..." -ForegroundColor Green
+    & $pythonCmd $scriptFile --server $Server --user $User --profile $Profile --url $Url --cookies-only
+} else {
+    Write-Host ""
+    Write-Host "Starting Chrome... Please login to IndiaMART when it opens." -ForegroundColor Green
+    Write-Host "After login, come back here and press ENTER to upload." -ForegroundColor Green
+    Write-Host "Already logged in on this PC? Run: .\login.ps1 -CookiesOnly" -ForegroundColor Cyan
+    Write-Host ""
+    & $pythonCmd $scriptFile --server $Server --user $User --profile $Profile --url $Url
+}
 
 Write-Host ""
 Read-Host "Done! Press Enter to close"
