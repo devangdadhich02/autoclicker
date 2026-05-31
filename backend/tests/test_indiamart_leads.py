@@ -77,10 +77,19 @@ def test_body_split_finds_laser_leads():
 
 def test_detects_logged_out_seller_landing():
     body = (
-        "IndiaMART\nBuy Leads\nHelp\nSign In\nSell on IndiaMART\n"
-        "How to Register\nSuccess Stories\nWhat can you sell"
+        "IndiaMART\nBuy Leads\nHelp\nHow to Register\nSuccess Stories\n"
+        "What can you sell\nSell for free on India's largest online B2B marketplace\n"
+        "IndiaMART Advantage"
     )
     assert is_indiamart_logged_out_body(body)
+
+
+def test_header_sign_in_not_logged_out_when_seller_ui_present():
+    body = (
+        "Sign In\nSell on IndiaMART\nBuy Leads\nLead Manager\nRecent Buy Leads\n"
+        "Manage Products\nSubscription"
+    )
+    assert not is_indiamart_logged_out_body(body)
     assert not is_indiamart_logged_out_body(
         "Laser Welding Machine\n4 mins ago\nKheda, Gujarat\nSold Out!"
     )

@@ -72,22 +72,86 @@ _TIME_AGO_RE = re.compile(
     re.IGNORECASE,
 )
 _LOGGED_OUT_MARKERS = (
-    "sign in",
-    "sell on indiamart",
     "how to register",
     "success stories",
     "what can you sell",
+    "sell for free on india",
+    "indiamart advantage",
+)
+# Nav chrome on many pages includes "sign in" / "sell on indiamart" — not proof of logout.
+_LOGGED_IN_MARKERS = (
+    "lead manager",
+    "seller dashboard",
+    "my dashboard",
+    "recent buy",
+    "buy leads",
+    "lms",
+    "manage product",
+    "catalog quality",
+    "i am interested",
+    "buyer also viewed",
+    "enquiry",
+    "inqry",
+    "bltxn",
+    "gst",
+    "subscription",
+    "credits left",
+    "welcome",
+    "logout",
+    "sign out",
 )
 
 
 def is_indiamart_logged_out_body(text: str) -> bool:
-    """True when page text is the public seller landing, not the logged-in leads feed."""
-    snippet = (text or "")[:900].lower()
-    if not snippet:
+    """
+    True only for the public marketing landing — not seller nav chrome before SPA loads.
+    Logged-in seller UI often still contains header links like Sign In.
+    """
+    snippet = (text or "").lower()
+    if len(snippet) < 120:
         return False
     if _TIME_AGO_RE.search(snippet):
         return False
-    return sum(1 for m in _LOGGED_OUT_MARKERS if m in snippet) >= 2
+    if sum(1 for m in _LOGGED_IN_MARKERS if m in snippet) >= 2:
+        return False
+    strong_public = (
+        "how to register" in snippet
+        and "success stories" in snippet
+        and ("what can you sell" in snippet or "sell for free" in snippet)
+    )
+    if strong_public:
+        return True
+    return sum(1 for m in _LOGGED_OUT_MARKERS if m in snippet) >= 3
+
+
+async def read_indiamart_page_text(page: Page, max_chars: int = 12_000) -> str:
+    """Prefer lead-list/main content over site-wide header/footer chrome."""
+    script = """
+    (maxChars) => {
+      const roots = [
+        '#leadList', '.byr-inqry-list', '[class*="bltxn"]',
+        '.seller-dashboard', 'main', '[role="main"]'
+      ];
+      for (const sel of roots) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const t = (el.innerText || '').trim();
+          if (t.length > 80) return t.slice(0, maxChars);
+        }
+      }
+      return (document.body.innerText || '').slice(0, maxChars);
+    }
+    """
+    try:
+        return await page.evaluate(script, max_chars)
+    except Exception:
+        try:
+            return await page.evaluate(
+                "(max) => (document.body.innerText || '').slice(0, max)",
+                max_chars,
+            )
+        except Exception:
+            return ""
 
 
 async def wait_for_page_ready(page: Page, timeout_ms: int = 45_000) -> bool:

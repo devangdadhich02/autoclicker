@@ -25,6 +25,7 @@ from app.automation.indiamart_page import (
     is_indiamart_logged_out_body,
     is_indiamart_login_url,
     is_indiamart_seller_url,
+    read_indiamart_page_text,
     scroll_lead_list,
     wait_for_page_ready,
 )
@@ -171,12 +172,10 @@ class JobRunner:
 
         await self._ensure_on_target_page(browser, job, page)
 
-        # ── Session Expiry Detection ─────────────────────────────────────────
         current_url = page.url.lower()
         if await self._is_session_expired(page, current_url):
             await self._handle_session_expired(current_url)
             return
-        # ────────────────────────────────────────────────────────────────────
 
         if not keywords:
             logger.warning(
@@ -246,9 +245,7 @@ class JobRunner:
             snippet = ""
             has_ago = False
             try:
-                snippet = await page.evaluate(
-                    "() => (document.body.innerText || '').slice(0, 900)"
-                )
+                snippet = await read_indiamart_page_text(page)
                 has_ago = bool(
                     re.search(
                         r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
@@ -496,16 +493,6 @@ class JobRunner:
                     return combined
         return body_text
 
-    async def _is_indiamart_public_page(self, page: Any) -> bool:
-        """Seller URL but marketing/login chrome — no recent-leads feed (logged out)."""
-        try:
-            snippet = await page.evaluate(
-                "() => (document.body.innerText || '').slice(0, 900)"
-            )
-        except Exception:
-            return False
-        return is_indiamart_logged_out_body(snippet)
-
     async def _is_session_expired(self, page: Any, current_url: str) -> bool:
         """Returns True if the browser has been redirected to a login page."""
         if is_indiamart_login_url(current_url):
@@ -513,12 +500,19 @@ class JobRunner:
         on_seller = is_indiamart_seller_url(current_url)
         for pattern in _LOGIN_URL_PATTERNS:
             if pattern in current_url:
-                if on_seller and "bltxn" in current_url:
+                if on_seller and ("bltxn" in current_url or "pref=recent" in current_url):
                     continue
                 return True
-        if on_seller and await self._is_indiamart_public_page(page):
-            return True
+        # Recent-leads SPA: decide logout only after lead scan (avoids false positives).
+        if on_seller and ("bltxn" in current_url or "pref=recent" in current_url):
+            return False
         if on_seller and "seller.indiamart.com" in current_url:
+            try:
+                snippet = await read_indiamart_page_text(page, 8000)
+            except Exception:
+                snippet = ""
+            if is_indiamart_logged_out_body(snippet):
+                return True
             return False
         try:
             page_text = await page.evaluate("() => (document.body.innerText || '').toLowerCase()")
