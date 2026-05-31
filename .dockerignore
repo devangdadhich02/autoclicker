@@ -1,0 +1,25 @@
+# Live browser sessions (bind-mounted at runtime — must not enter build context)
+browser_profiles/
+
+# Local / runtime data
+data/
+backend/data/
+.git/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Frontend (built inside Docker stage)
+frontend/node_modules/
+frontend/dist/
+
+# IDE / OS
+.cursor/
+.vscode/
+*.md
+!docker/**/*.md
