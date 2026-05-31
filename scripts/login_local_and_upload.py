@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 import zipfile
 from datetime import UTC, datetime
@@ -379,11 +380,38 @@ async def run_local_login(
 
         final_url = page.url
         final_lower = final_url.lower()
-        login_ok = not any(p in final_lower for p in ("login", "signin", "sign-in"))
-        if not login_ok:
-            print("\n  WARNING: Still on login page. Finish login before pressing ENTER.")
+        try:
+            body = await page.evaluate("() => (document.body.innerText || '').slice(0, 4000)")
+        except Exception:
+            body = ""
+        body_lower = body.lower()
+        has_leads_feed = bool(
+            re.search(
+                r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
+                body,
+                re.I,
+            )
+        )
+        on_marketing = (
+            "how to register" in body_lower
+            and "success stories" in body_lower
+            and "sign in" in body_lower
+            and not has_leads_feed
+        )
+        login_ok = (
+            not any(p in final_lower for p in ("login", "signin", "sign-in"))
+            and not on_marketing
+            and (has_leads_feed or "lead manager" in body_lower or "bltxn" in final_lower)
+        )
+        if on_marketing:
+            print(
+                "\n  ERROR: Still on public IndiaMART page. Open Recent Buy Leads, "
+                "see buyer rows, then press ENTER."
+            )
+        elif not login_ok:
+            print("\n  WARNING: Login not verified. Finish login on Recent Buy Leads.")
         else:
-            print(f"\n  Login looks OK (current page: {final_url})")
+            print(f"\n  Login verified (leads feed visible). Page: {final_url}")
 
         session_meta = {
             "profile_name": profile_name,

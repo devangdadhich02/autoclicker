@@ -4,7 +4,10 @@ from app.automation.indiamart_leads import (
     is_weak_match_context,
     lead_record_is_complete,
 )
-from app.automation.indiamart_page import is_indiamart_logged_out_body
+from app.automation.indiamart_page import (
+    is_indiamart_logged_out_body,
+    is_indiamart_marketing_landing,
+)
 
 
 def test_rejects_parts_and_spares_nav():
@@ -82,6 +85,14 @@ def test_detects_logged_out_seller_landing():
         "IndiaMART Advantage"
     )
     assert is_indiamart_logged_out_body(body)
+
+
+def test_marketing_landing_detected():
+    body = (
+        "IndiaMART\nSign In\nSell on IndiaMART\nHow to Register\n"
+        "Success Stories\nWhat can you sell"
+    )
+    assert is_indiamart_marketing_landing(body)
 
 
 def test_header_sign_in_not_logged_out_when_seller_ui_present():

@@ -24,9 +24,11 @@ from app.automation.indiamart_page import (
     ensure_bltxn_leads_page,
     is_indiamart_logged_out_body,
     is_indiamart_login_url,
+    is_indiamart_marketing_landing,
     is_indiamart_seller_url,
     read_indiamart_page_text,
     scroll_lead_list,
+    seller_session_is_authenticated,
     wait_for_page_ready,
 )
 from app.core.config import settings
@@ -222,6 +224,19 @@ class JobRunner:
     ) -> None:
         """Only real buyer inquiry rows — extract name/phone/message before counting a lead."""
         await self._heartbeat()
+        if not await seller_session_is_authenticated(page):
+            try:
+                full = await page.evaluate("() => document.body.innerText || ''")
+            except Exception:
+                full = ""
+            logger.warning(
+                "IndiaMART cookies not active in browser — public page shown",
+                job_id=self.job_id,
+                url=page_url,
+                preview=full[:220],
+            )
+            await self._handle_session_expired(page_url)
+            return
         blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
             try:
@@ -262,7 +277,13 @@ class JobRunner:
                 url=page_url,
                 diagnostic=diag,
             )
-            if is_indiamart_logged_out_body(snippet):
+            try:
+                full_body = await page.evaluate("() => document.body.innerText || ''")
+            except Exception:
+                full_body = snippet
+            if is_indiamart_marketing_landing(full_body) or is_indiamart_logged_out_body(
+                full_body
+            ):
                 await self._handle_session_expired(page_url)
                 return
             await self._log_event(
@@ -532,9 +553,10 @@ class JobRunner:
     async def _handle_session_expired(self, current_url: str) -> None:
         """Log critical alert and pause the job so seller knows to re-login."""
         msg = (
-            f"Session expired — browser redirected to login page ({current_url}). "
-            "Re-run login on your PC: .\\login.ps1 — then set job Browser Profile = indiamart "
-            "and restart the job."
+            "IndiaMART seller login not active in the server browser (public page or expired session). "
+            "Stop the job → run login.ps1 on client PC (open Recent Buy Leads before ENTER) → "
+            "confirm dashboard Seller Session = YES → Start job. Profile must be indiamart."
+            f" (url={current_url})"
         )
         logger.critical(
             "SESSION EXPIRED — job paused, re-login required",

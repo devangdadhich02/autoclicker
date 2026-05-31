@@ -84,7 +84,6 @@ _LOGGED_IN_MARKERS = (
     "seller dashboard",
     "my dashboard",
     "recent buy",
-    "buy leads",
     "lms",
     "manage product",
     "catalog quality",
@@ -122,6 +121,20 @@ def is_indiamart_logged_out_body(text: str) -> bool:
     if strong_public:
         return True
     return sum(1 for m in _LOGGED_OUT_MARKERS if m in snippet) >= 3
+
+
+def is_indiamart_marketing_landing(text: str) -> bool:
+    """Public seller homepage — cookies not applied (not the logged-in LMS)."""
+    t = (text or "").lower()
+    if len(t) < 80:
+        return False
+    if _TIME_AGO_RE.search(t):
+        return False
+    return (
+        "sign in" in t
+        and "how to register" in t
+        and "success stories" in t
+    )
 
 
 async def read_indiamart_page_text(page: Page, max_chars: int = 12_000) -> str:
@@ -227,39 +240,67 @@ async def scroll_lead_list(page: Page) -> None:
 
 
 async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEADS_URL) -> None:
-    """Force the recent-buy-leads list (SPA hash URLs are not enough)."""
+    """Open recent buy leads with full URL + reload so persisted cookies apply."""
     target = INDIAMART_LEADS_URL
     if "bltxn" in (fallback_url or "").lower():
         target = fallback_url
-    try:
-        await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
-    except Exception:
-        pass
-    try:
-        await page.wait_for_timeout(2500)
-        await page.evaluate(
-            f"() => {{ window.location.assign({json.dumps(target)}); }}"
-        )
-        await page.wait_for_timeout(3500)
+    for attempt in range(2):
         try:
-            await page.wait_for_load_state("networkidle", timeout=20_000)
+            await page.goto(
+                "https://seller.indiamart.com/",
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            await page.wait_for_timeout(2000)
         except Exception:
             pass
-    except Exception:
-        pass
-    await wait_for_page_ready(page)
-    await click_recent_buy_leads_tab(page)
-    try:
-        await page.wait_for_function(
-            """() => {
-              const t = document.body.innerText || '';
-              return /\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
-            }""",
-            timeout=15_000,
-        )
-    except Exception:
-        pass
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
+        except Exception:
+            pass
+        try:
+            await page.wait_for_timeout(3000)
+            if "#" not in (page.url or ""):
+                await page.evaluate(
+                    f"() => {{ window.location.assign({json.dumps(target)}); }}"
+                )
+                await page.wait_for_timeout(4000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=25_000)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        await wait_for_page_ready(page)
+        await click_recent_buy_leads_tab(page)
+        try:
+            await page.wait_for_function(
+                """() => {
+                  const t = document.body.innerText || '';
+                  return /\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
+                }""",
+                timeout=25_000,
+            )
+        except Exception:
+            pass
+        body = await read_indiamart_page_text(page, 8000)
+        if _TIME_AGO_RE.search(body) or not is_indiamart_marketing_landing(body):
+            break
+        if attempt == 0:
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                await page.wait_for_timeout(4000)
+            except Exception:
+                pass
     await scroll_lead_list(page)
+
+
+async def seller_session_is_authenticated(page: Page) -> bool:
+    """True when page shows logged-in seller feed, not the public marketing landing."""
+    body = await read_indiamart_page_text(page, 10_000)
+    if _TIME_AGO_RE.search(body):
+        return True
+    return not is_indiamart_marketing_landing(body)
 
 
 async def open_first_lead_card(page: Page) -> bool:
