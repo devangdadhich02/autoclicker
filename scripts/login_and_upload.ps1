@@ -15,6 +15,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "This will open Chrome on YOUR computer." -ForegroundColor Yellow
 Write-Host "After you login, session uploads to server." -ForegroundColor Yellow
+Write-Host "Before running: STOP the bot job on the Velora dashboard." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Server: $Server" -ForegroundColor Green
 Write-Host "Profile: $Profile" -ForegroundColor Green

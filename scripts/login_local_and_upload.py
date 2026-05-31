@@ -26,6 +26,23 @@ from tempfile import TemporaryDirectory
 
 META_FILENAME = ".velora_session_meta.json"
 
+# Chrome cache — huge, not needed for login; causes "Permission denied" on server
+_SKIP_DIR_PARTS = frozenset(
+    {
+        "Cache",
+        "Code Cache",
+        "GPUCache",
+        "ShaderCache",
+        "GrShaderCache",
+        "blob_storage",
+        "Crashpad",
+        "BrowserMetrics",
+        "Safe Browsing",
+        "Service Worker",
+    }
+)
+_SKIP_FILE_NAMES = frozenset({"LOCK", "LOG", "LOG.old", "Cookies-journal"})
+
 # Common project paths on the VPS (Docker Compose)
 COMPOSE_DIR_CANDIDATES = (
     "/home/autoclicker/autoclicker",
@@ -35,12 +52,21 @@ COMPOSE_DIR_CANDIDATES = (
 )
 
 
+def _should_skip_profile_file(file: Path) -> bool:
+    if file.name in _SKIP_FILE_NAMES:
+        return True
+    return any(part in _SKIP_DIR_PARTS for part in file.parts)
+
+
 def zip_profile(profile_dir: Path, output_zip: Path) -> None:
-    """Zip the browser profile for upload."""
+    """Zip cookies + preferences only (skip Chrome cache folders)."""
+    count = 0
     with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED) as zf:
         for file in profile_dir.rglob("*"):
-            if file.is_file():
+            if file.is_file() and not _should_skip_profile_file(file):
                 zf.write(file, file.relative_to(profile_dir))
+                count += 1
+    print(f"  Zipped {count} profile files (cache folders skipped)")
 
 
 def write_session_meta(profile_dir: Path, meta: dict) -> None:
@@ -127,20 +153,58 @@ def _put_meta_sftp(ssh, remote_dir: str, session_meta: dict) -> None:
     Path(local_meta).unlink(missing_ok=True)
 
 
+def _stop_backend_container(ssh) -> str | None:
+    container = _detect_backend_container(ssh)
+    if not container:
+        return None
+    print("  Stopping server bot container (so profile can be replaced)...")
+    for docker_bin in ("docker", "sudo docker"):
+        code, _, _ = _ssh_exec(ssh, f"{docker_bin} stop {container} 2>/dev/null", timeout=120)
+        if code == 0:
+            return container
+    return container
+
+
+def _start_backend_container(ssh, container: str | None) -> None:
+    if not container:
+        return
+    for docker_bin in ("docker", "sudo docker"):
+        if _ssh_exec(ssh, f"{docker_bin} start {container} 2>/dev/null")[0] == 0:
+            print(f"  Restarted container: {container}")
+            return
+
+
+def _prepare_host_profile_dir(ssh, host_profile_dir: str, ssh_user: str) -> None:
+    parent = str(Path(host_profile_dir).parent).replace("\\", "/")
+    _ssh_exec(ssh, f"sudo mkdir -p {parent}")
+    _ssh_exec(ssh, f"sudo rm -rf {host_profile_dir}")
+    _ssh_exec(ssh, f"sudo mkdir -p {host_profile_dir}")
+    _ssh_exec(ssh, f"sudo chown -R {ssh_user}:{ssh_user} {parent}")
+
+
 def _upload_via_host_bind(
     ssh,
     remote_zip_host: str,
     host_profile_dir: str,
     profile_name: str,
     session_meta: dict | None,
+    ssh_user: str,
 ) -> tuple[bool, str, int]:
     """SSH unzip into project/browser_profiles — works without docker CLI for the client."""
-    _ssh_exec(ssh, f"rm -rf {host_profile_dir}")
-    code, _out, err = _ssh_exec(
-        ssh,
-        f"mkdir -p {host_profile_dir} && unzip -o {remote_zip_host} -d {host_profile_dir} "
-        f"&& rm -f {remote_zip_host}",
+    stopped = _stop_backend_container(ssh)
+    _prepare_host_profile_dir(ssh, host_profile_dir, ssh_user)
+    unzip_cmd = (
+        f"unzip -o {remote_zip_host} -d {host_profile_dir} && rm -f {remote_zip_host}"
     )
+    code, _out, err = _ssh_exec(ssh, unzip_cmd)
+    if code != 0:
+        unzip_cmd = (
+            f"sudo unzip -o {remote_zip_host} -d {host_profile_dir} && "
+            f"sudo chown -R {ssh_user}:{ssh_user} {host_profile_dir} && "
+            f"rm -f {remote_zip_host}"
+        )
+        code, _out, err = _ssh_exec(ssh, unzip_cmd)
+    _start_backend_container(ssh, stopped)
     if code != 0:
         print(f"  Host upload failed: {err}")
         return False, host_profile_dir, 0
@@ -248,7 +312,7 @@ def upload_to_server(
 
         # 1) Host bind folder — client SSH only; matches docker-compose ./browser_profiles mount
         ok, remote_path, file_count = _upload_via_host_bind(
-            ssh, remote_zip_host, host_profile_dir, profile_name, session_meta
+            ssh, remote_zip_host, host_profile_dir, profile_name, session_meta, ssh_user
         )
         if not ok:
             # zip was removed; re-upload for docker attempt
@@ -434,7 +498,7 @@ async def run_local_login(
 
     with TemporaryDirectory() as tmpdir:
         zip_path = Path(tmpdir) / f"{profile_name}_profile.zip"
-        print("  Zipping profile...")
+        print("  Zipping profile (cookies + login data only)...")
         zip_profile(profile_dir, zip_path)
 
         print("  Uploading into Docker backend volume...")
