@@ -112,6 +112,21 @@ class JobService:
         job.total_leads_detected += 1
         await self._db.flush()
 
+    async def reset_stats(self, job_id: str | None = None) -> int:
+        """Zero lead/action/error counters (one job or all)."""
+        stmt = select(AutomationJob)
+        if job_id:
+            stmt = stmt.where(AutomationJob.id == job_id)
+        result = await self._db.execute(stmt)
+        jobs = list(result.scalars().all())
+        for job in jobs:
+            job.total_leads_detected = 0
+            job.total_actions_executed = 0
+            job.error_count = 0
+            job.last_error = None
+        await self._db.flush()
+        return len(jobs)
+
     async def record_error(self, job_id: str, error_message: str) -> None:
         job = await self.get_by_id(job_id)
         job.last_error = error_message

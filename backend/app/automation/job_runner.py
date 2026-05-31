@@ -305,7 +305,7 @@ class JobRunner:
         }
         msg = (
             f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
-            f"{lead.get('buyer_location', '')} | "
+            f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
             f"Phone: {lead.get('buyer_phone', 'N/A')} | "
             f"Name: {lead.get('buyer_name', 'N/A')}"
         )

@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import AdminUser, CurrentUser, DbSession
 from app.api.schemas.event_log import AnalyticsSummary, EventLogResponse
 from app.models.event_log import EventSeverity
 from app.services.event_log_service import EventLogService
@@ -70,49 +70,88 @@ async def get_analytics_summary(
     )
 
 
+def _flatten_lead_details(details: dict) -> dict:
+    if "lead" in details and isinstance(details["lead"], dict):
+        return details["lead"]
+    return details
+
+
+@router.delete("/clear")
+async def clear_logs(
+    db: DbSession,
+    _admin: AdminUser,
+    job_id: str | None = Query(default=None),
+    reset_job_stats: bool = Query(default=True),
+    clear_csv_files: bool = Query(default=True),
+) -> dict:
+    """Delete event logs from DB (optional: one job). Resets counters and lead CSV files."""
+    from app.services.lead_store import clear_lead_csv_files
+
+    log_svc = EventLogService(db)
+    deleted = await log_svc.delete_all(job_id=job_id)
+    jobs_reset = 0
+    csv_removed = 0
+    if reset_job_stats:
+        job_svc = JobService(db)
+        jobs_reset = await job_svc.reset_stats(job_id=job_id)
+    if clear_csv_files:
+        csv_removed = clear_lead_csv_files(job_id=job_id)
+    await db.commit()
+    return {
+        "deleted_logs": deleted,
+        "jobs_reset": jobs_reset,
+        "csv_files_removed": csv_removed,
+    }
+
+
 @router.get("/export/csv")
 async def export_logs_csv(
     db: DbSession,
     current_user: CurrentUser,
     job_id: str | None = Query(default=None),
+    severity: EventSeverity | None = Query(default=None),
+    event_type: str | None = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=5000),
 ) -> StreamingResponse:
     svc = EventLogService(db)
-    logs = await svc.list_logs(job_id=job_id, limit=limit)
+    logs = await svc.list_logs(
+        job_id=job_id,
+        severity=severity,
+        event_type=event_type,
+        limit=limit,
+    )
 
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "id", "job_id", "severity", "event_type", "message",
-        "keyword_matched",
-        "buyer_name", "buyer_phone", "buyer_email", "inquiry_message", "full_detail",
-        "created_at",
+        "created_at", "job_id", "severity", "event_type", "message", "keyword_matched",
+        "product_title", "buyer_name", "buyer_phone", "buyer_email",
+        "buyer_location", "buyer_address", "inquiry_message", "context_snippet", "page_url",
     ])
     for log in logs:
-        # Parse lead details from JSON if present
         details: dict = {}
         if log.details:
             try:
-                details = json.loads(log.details)
+                details = _flatten_lead_details(json.loads(log.details))
             except Exception:
                 pass
-        # If details has a nested "lead" key (from webhook inject path), flatten it
-        if "lead" in details and isinstance(details["lead"], dict):
-            details = details["lead"]
 
         writer.writerow([
-            log.id,
+            log.created_at.isoformat() if log.created_at else "",
             log.job_id or "",
             log.severity,
             log.event_type,
             log.message,
             log.keyword_matched or "",
+            details.get("product_title", ""),
             details.get("buyer_name", ""),
             details.get("buyer_phone", ""),
             details.get("buyer_email", ""),
-            details.get("message", details.get("text", "")),
-            details.get("full_detail", ""),
-            log.created_at.isoformat() if log.created_at else "",
+            details.get("buyer_location", ""),
+            details.get("buyer_address", ""),
+            details.get("message", details.get("inquiry_message", details.get("text", ""))),
+            details.get("context_snippet", ""),
+            details.get("page_url", ""),
         ])
 
     output.seek(0)
@@ -129,39 +168,53 @@ async def export_leads_csv(
     db: DbSession,
     current_user: CurrentUser,
     job_id: str | None = Query(default=None),
+    severity: EventSeverity | None = Query(default=None),
+    event_type: str | None = Query(default=None),
     limit: int = Query(default=5000, ge=1, le=5000),
 ) -> StreamingResponse:
-    """Export only lead events (keyword_detected + lead_extracted) for spreadsheet use."""
+    """Export lead events; respects same filters as the logs table."""
     svc = EventLogService(db)
-    logs = await svc.list_logs(job_id=job_id, limit=limit)
-    lead_logs = [log for log in logs if log.event_type in ("keyword_detected", "lead_extracted")]
+    logs = await svc.list_logs(
+        job_id=job_id,
+        severity=severity,
+        event_type=event_type or None,
+        limit=limit,
+    )
+    lead_types = ("keyword_detected", "lead_extracted")
+    if event_type and event_type in lead_types:
+        lead_logs = list(logs)
+    else:
+        lead_logs = [log for log in logs if log.event_type in lead_types]
 
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
         "created_at", "job_id", "event_type", "keyword_matched", "message",
-        "buyer_name", "buyer_phone", "buyer_email", "inquiry_message", "context_snippet",
+        "product_title", "buyer_name", "buyer_phone", "buyer_email",
+        "buyer_location", "buyer_address", "inquiry_message", "context_snippet", "page_url",
     ])
     for log in lead_logs:
         details: dict = {}
         if log.details:
             try:
-                details = json.loads(log.details)
+                details = _flatten_lead_details(json.loads(log.details))
             except Exception:
                 pass
-        if "lead" in details and isinstance(details["lead"], dict):
-            details = details["lead"]
         writer.writerow([
             log.created_at.isoformat() if log.created_at else "",
             log.job_id or "",
             log.event_type,
             log.keyword_matched or "",
             log.message,
+            details.get("product_title", ""),
             details.get("buyer_name", ""),
             details.get("buyer_phone", ""),
             details.get("buyer_email", ""),
-            details.get("message", details.get("text", "")),
+            details.get("buyer_location", ""),
+            details.get("buyer_address", ""),
+            details.get("message", details.get("inquiry_message", details.get("text", ""))),
             details.get("context_snippet", ""),
+            details.get("page_url", ""),
         ])
 
     output.seek(0)

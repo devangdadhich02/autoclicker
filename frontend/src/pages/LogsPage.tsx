@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Download, RefreshCw, Filter } from 'lucide-react'
+import { Download, RefreshCw, Filter, Trash2 } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import clsx from 'clsx'
+import toast from 'react-hot-toast'
 import { api } from '../lib/api'
-import type { EventLog, EventSeverity } from '../types'
+import { useAuthStore } from '../store/authStore'
+import type { AutomationJob, EventLog, EventSeverity } from '../types'
 
 const SEVERITIES: EventSeverity[] = ['debug', 'info', 'warning', 'error', 'critical']
 
@@ -15,79 +17,163 @@ const SEV_CLS: Record<EventSeverity, string> = {
   critical: 'bg-red-900 text-red-200 font-semibold',
 }
 
+function buildExportParams(
+  limit: number,
+  filterSev: EventSeverity | '',
+  filterType: string,
+  filterJobId: string,
+): Record<string, string | number> {
+  const params: Record<string, string | number> = { limit }
+  if (filterSev) params.severity = filterSev
+  if (filterType.trim()) params.event_type = filterType.trim()
+  if (filterJobId) params.job_id = filterJobId
+  return params
+}
+
 export default function LogsPage() {
+  const user = useAuthStore(s => s.user)
+  const isAdmin = user?.role === 'admin'
   const [logs, setLogs] = useState<EventLog[]>([])
+  const [jobs, setJobs] = useState<AutomationJob[]>([])
   const [loading, setLoading] = useState(true)
+  const [clearing, setClearing] = useState(false)
   const [filterSev, setFilterSev] = useState<EventSeverity | ''>('')
   const [filterType, setFilterType] = useState('')
+  const [filterJobId, setFilterJobId] = useState('')
   const [limit, setLimit] = useState(100)
+
+  useEffect(() => {
+    api.get('/jobs', { params: { limit: 200 } }).then(r => setJobs(r.data)).catch(() => {})
+  }, [])
 
   useEffect(() => {
     fetchLogs()
     const timer = setInterval(() => fetchLogs(true), 10_000)
     return () => clearInterval(timer)
-  }, [filterSev, limit])
+  }, [filterSev, filterType, filterJobId, limit])
 
   async function fetchLogs(silent = false) {
     if (!silent) setLoading(true)
     try {
-      const params: Record<string, string | number> = { limit }
-      if (filterSev) params.severity = filterSev
-      if (filterType) params.event_type = filterType
+      const params = buildExportParams(limit, filterSev, filterType, filterJobId)
       const { data } = await api.get('/logs', { params })
       setLogs(data)
     } catch {} finally { if (!silent) setLoading(false) }
   }
 
   async function exportCsv() {
-    const params: Record<string, string | number> = { limit: 5000 }
-    if (filterSev) params.severity = filterSev
+    const params = buildExportParams(5000, filterSev, filterType, filterJobId)
     const resp = await api.get('/logs/export/csv', { params, responseType: 'blob' })
     const url = URL.createObjectURL(resp.data)
     const a = document.createElement('a')
-    a.href = url; a.download = 'velora_logs.csv'; a.click()
+    a.href = url
+    a.download = 'velora_logs.csv'
+    a.click()
     URL.revokeObjectURL(url)
   }
 
   async function exportLeadsCsv() {
-    const resp = await api.get('/logs/export/leads/csv', { params: { limit: 5000 }, responseType: 'blob' })
+    const params = buildExportParams(5000, filterSev, filterType, filterJobId)
+    const resp = await api.get('/logs/export/leads/csv', { params, responseType: 'blob' })
     const url = URL.createObjectURL(resp.data)
     const a = document.createElement('a')
-    a.href = url; a.download = 'velora_leads.csv'; a.click()
+    a.href = url
+    a.download = 'velora_leads.csv'
+    a.click()
     URL.revokeObjectURL(url)
+  }
+
+  async function clearLogs() {
+    const scope = filterJobId
+      ? jobs.find(j => j.id === filterJobId)?.name ?? 'this job'
+      : 'ALL jobs'
+    if (!window.confirm(`Delete all event logs for ${scope}? Lead counters and CSV files will reset. This cannot be undone.`)) {
+      return
+    }
+    setClearing(true)
+    try {
+      const params: Record<string, string | boolean> = { reset_job_stats: true, clear_csv_files: true }
+      if (filterJobId) params.job_id = filterJobId
+      const { data } = await api.delete('/logs/clear', { params })
+      toast.success(`Cleared ${data.deleted_logs} logs`)
+      await fetchLogs()
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      toast.error(msg ?? 'Clear failed (admin only)')
+    } finally {
+      setClearing(false)
+    }
   }
 
   return (
     <div className="p-6 space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-white">Event Logs</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{logs.length} entries shown</p>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {logs.length} entries shown — download uses active filters
+          </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={() => fetchLogs()} className="btn-ghost py-1.5 px-3 text-xs"><RefreshCw size={12} /> Refresh</button>
-          <button onClick={exportLeadsCsv} className="btn-primary py-1.5 px-3 text-xs"><Download size={12} /> Export Leads CSV</button>
-          <button onClick={exportCsv} className="btn-ghost py-1.5 px-3 text-xs"><Download size={12} /> All Logs CSV</button>
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={() => fetchLogs()} className="btn-ghost py-1.5 px-3 text-xs">
+            <RefreshCw size={12} /> Refresh
+          </button>
+          {isAdmin && (
+            <button
+              onClick={clearLogs}
+              disabled={clearing}
+              className="btn-ghost py-1.5 px-3 text-xs text-red-400 border-red-900/50 hover:bg-red-950/40"
+            >
+              <Trash2 size={12} /> {clearing ? 'Clearing…' : 'Clear Logs'}
+            </button>
+          )}
+          <button onClick={exportLeadsCsv} className="btn-primary py-1.5 px-3 text-xs">
+            <Download size={12} /> Export Leads CSV
+          </button>
+          <button onClick={exportCsv} className="btn-ghost py-1.5 px-3 text-xs">
+            <Download size={12} /> Export Filtered Logs
+          </button>
         </div>
       </div>
 
-      {/* Filters */}
       <div className="flex gap-3 flex-wrap">
         <div className="flex items-center gap-2">
           <Filter size={13} className="text-gray-500" />
-          <select className="input w-36 py-1.5 text-xs" value={filterSev} onChange={e => setFilterSev(e.target.value as any)}>
+          <select
+            className="input w-36 py-1.5 text-xs"
+            value={filterSev}
+            onChange={e => setFilterSev(e.target.value as EventSeverity | '')}
+          >
             <option value="">All Severities</option>
-            {SEVERITIES.map(s => <option key={s} value={s}>{s}</option>)}
+            {SEVERITIES.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
           </select>
         </div>
-        <input className="input w-48 py-1.5 text-xs" placeholder="Event type filter..." value={filterType}
-          onChange={e => setFilterType(e.target.value)} onKeyDown={e => e.key === 'Enter' && fetchLogs()} />
+        <select
+          className="input w-44 py-1.5 text-xs"
+          value={filterJobId}
+          onChange={e => setFilterJobId(e.target.value)}
+        >
+          <option value="">All Jobs</option>
+          {jobs.map(j => (
+            <option key={j.id} value={j.id}>{j.name}</option>
+          ))}
+        </select>
+        <input
+          className="input w-48 py-1.5 text-xs"
+          placeholder="Event type (e.g. lead_extracted)"
+          value={filterType}
+          onChange={e => setFilterType(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && fetchLogs()}
+        />
         <select className="input w-28 py-1.5 text-xs" value={limit} onChange={e => setLimit(+e.target.value)}>
-          {[50, 100, 250, 500].map(n => <option key={n} value={n}>Last {n}</option>)}
+          {[50, 100, 250, 500].map(n => (
+            <option key={n} value={n}>Last {n}</option>
+          ))}
         </select>
       </div>
 
-      {/* Log table */}
       <div className="card p-0 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-xs">

@@ -27,6 +27,15 @@ _NON_LEAD_PHRASES = (
     "catalog",
     "my products",
     "business loan",
+    "buying interests",
+    "selling items",
+    "buyer viewed",
+    "you sell",
+    "you viewed",
+    "member since",
+    "requirements ·",
+    "calls ·",
+    "replies",
 )
 
 # Real IndiaMART buyer rows usually include time, interest, or verification cues
@@ -87,19 +96,25 @@ class BuyerLeadBlock:
 
 def is_buyer_inquiry_block(text: str) -> bool:
     """True when text looks like a BuyLead / recent inquiry row, not site chrome."""
+    return is_seller_incoming_buy_lead(text)
+
+
+def is_seller_incoming_buy_lead(text: str) -> bool:
+    """
+    Incoming buyer on this seller's Recent Buy Leads feed — not nav, not buyer profile sidebar.
+    """
     t = (text or "").strip()
-    if len(t) < 30 or len(t) > 3000:
+    if len(t) < 35 or len(t) > 3000:
         return False
     lower = t.lower()
     if any(p in lower for p in _NON_LEAD_PHRASES):
         return False
-    if _TIME_RE.search(t):
-        return True
-    if any(h in lower for h in _BUYER_ROW_HINTS):
-        return True
-    if _LOCATION_RE.search(t) and len(t) > 50:
-        return True
-    return False
+    if not _TIME_RE.search(t):
+        return False
+    has_product_line = bool(re.search(r"[a-zA-Z]{4,}", t.split("\n")[0] if "\n" in t else t[:80]))
+    has_interest = "interested" in lower or "requirement" in lower or "category" in lower
+    has_loc = bool(_LOCATION_RE.search(t))
+    return has_product_line and (has_interest or has_loc)
 
 
 def is_weak_match_context(snippet: str, keyword: str) -> bool:
@@ -114,18 +129,27 @@ def is_weak_match_context(snippet: str, keyword: str) -> bool:
     return not any(w in s for w in specific)
 
 
+def _parse_address_from_text(text: str) -> str:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or _TIME_RE.search(line):
+            continue
+        if _LOCATION_RE.search(line) or ("," in line and len(line) < 120):
+            return line[:300]
+    loc = _LOCATION_RE.search(text)
+    return loc.group(0) if loc else ""
+
+
 def lead_record_is_complete(block_text: str, lead: dict[str, str]) -> bool:
-    """Need buyer contact OR strong row text (product + place + time)."""
+    """Real captured lead: contact info or full buyer row (product + address + time)."""
     if lead.get("buyer_phone") or lead.get("buyer_email"):
         return True
-    if lead.get("buyer_name") and (lead.get("message") or lead.get("product_title")):
+    if lead.get("buyer_name") and lead.get("product_title"):
         return True
-    t = block_text.lower()
     has_time = bool(_TIME_RE.search(block_text))
-    has_loc = bool(_LOCATION_RE.search(block_text))
-    has_interest = "interested" in t or "requirement" in t
-    has_product = len(t) > 40 and not any(p in t for p in _NON_LEAD_PHRASES)
-    return has_product and has_time and (has_loc or has_interest)
+    has_addr = bool(lead.get("buyer_address") or lead.get("buyer_location"))
+    has_product = bool(lead.get("product_title")) and len(lead.get("product_title", "")) > 8
+    return has_time and has_addr and has_product
 
 
 async def collect_buyer_lead_blocks(page: Page) -> list[BuyerLeadBlock]:
@@ -134,16 +158,29 @@ async def collect_buyer_lead_blocks(page: Page) -> list[BuyerLeadBlock]:
     (selectors) => {
       const out = [];
       const seen = new Set();
-      for (const sel of selectors) {
-        const nodes = document.querySelectorAll(sel);
-        nodes.forEach((el, idx) => {
-          const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
-          const key = text.slice(0, 120);
-          if (text.length < 30 || seen.has(key)) return;
-          seen.add(key);
-          out.push({ text, row_index: idx, selector: sel });
-        });
-        if (out.length >= 40) break;
+      const roots = [
+        '#leadList', '.byr-inqry-list', '.bltxn-list', '[class*="bltxn"]',
+        '[class*="inqry-list"]', 'main'
+      ];
+      const scopes = [];
+      for (const r of roots) {
+        const root = document.querySelector(r);
+        if (root) scopes.push(root);
+      }
+      if (!scopes.length) scopes.push(document.body);
+      for (const scope of scopes) {
+        for (const sel of selectors) {
+          const nodes = scope.querySelectorAll(sel);
+          nodes.forEach((el, idx) => {
+            const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+            const key = text.slice(0, 140);
+            if (text.length < 35 || seen.has(key)) return;
+            if (!/ago\\b/i.test(text)) return;
+            seen.add(key);
+            out.push({ text, row_index: idx, selector: sel });
+          });
+        }
+        if (out.length >= 30) break;
       }
       return out;
     }
@@ -155,7 +192,7 @@ async def collect_buyer_lead_blocks(page: Page) -> list[BuyerLeadBlock]:
     blocks: list[BuyerLeadBlock] = []
     for item in raw or []:
         text = (item.get("text") or "").strip()
-        if not is_buyer_inquiry_block(text):
+        if not is_seller_incoming_buy_lead(text):
             continue
         blocks.append(
             BuyerLeadBlock(
@@ -188,9 +225,12 @@ async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, s
         lines = [ln.strip() for ln in block_text.splitlines() if ln.strip()]
         if lines:
             lead["product_title"] = lines[0][:200]
+        lead["buyer_address"] = _parse_address_from_text(block_text)
         loc = _LOCATION_RE.search(block_text)
         if loc:
             lead["buyer_location"] = loc.group(0)
+        if not lead.get("buyer_address"):
+            lead["buyer_address"] = lead.get("buyer_location", "")
 
     panel_text = ""
     for sel in (
@@ -247,5 +287,7 @@ async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, s
         loc = _LOCATION_RE.search(combined)
         if loc:
             lead["buyer_location"] = loc.group(0)
+    if not lead.get("buyer_address"):
+        lead["buyer_address"] = _parse_address_from_text(combined) or lead.get("buyer_location", "")
 
     return lead

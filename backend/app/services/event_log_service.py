@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select, desc
+from sqlalchemy import delete, select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.event_log import EventLog, EventSeverity
@@ -60,3 +60,10 @@ class EventLogService:
         query = query.group_by(EventLog.severity)
         result = await self._db.execute(query)
         return {row.severity: row.cnt for row in result}
+
+    async def delete_all(self, job_id: str | None = None) -> int:
+        stmt = delete(EventLog)
+        if job_id:
+            stmt = stmt.where(EventLog.job_id == job_id)
+        result = await self._db.execute(stmt)
+        return result.rowcount or 0

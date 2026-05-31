@@ -28,7 +28,12 @@ def test_lead_complete_with_phone():
 
 
 def test_lead_complete_with_time_and_location():
+    block = "Metal Laser Marking Machine\nNew Delhi, Delhi · 46 mins ago\nBusiness Use"
     assert lead_record_is_complete(
-        "Metal Laser Marking Machine\nNew Delhi, Delhi · 46 mins ago\nBusiness Use",
-        {},
+        block,
+        {
+            "product_title": "Metal Laser Marking Machine",
+            "buyer_address": "New Delhi, Delhi",
+            "buyer_location": "New Delhi",
+        },
     )

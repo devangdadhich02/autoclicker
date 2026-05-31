@@ -25,6 +25,7 @@ _CSV_HEADERS = [
     "buyer_phone",
     "buyer_email",
     "buyer_location",
+    "buyer_address",
     "inquiry_message",
     "context_snippet",
     "page_url",
@@ -60,6 +61,7 @@ def append_lead_row(
         "buyer_phone": details.get("buyer_phone", ""),
         "buyer_email": details.get("buyer_email", ""),
         "buyer_location": details.get("buyer_location", ""),
+        "buyer_address": details.get("buyer_address", details.get("buyer_location", "")),
         "inquiry_message": details.get("message", details.get("inquiry_message", details.get("text", message))),
         "context_snippet": context_snippet or details.get("context_snippet", ""),
         "page_url": page_url or "",
@@ -80,6 +82,22 @@ def append_lead_row(
     except Exception as exc:
         logger.error("Failed to append lead CSV", job_id=job_id, error=str(exc))
         return None
+
+
+def clear_lead_csv_files(job_id: str | None = None) -> int:
+    """Remove on-disk lead CSV files (all jobs or one job prefix)."""
+    removed = 0
+    base = settings.LEADS_CSV_DIR
+    if not base.exists():
+        return 0
+    suffix = f"_{job_id[:8]}_leads.csv" if job_id else "_leads.csv"
+    for path in base.glob(f"*{suffix}"):
+        try:
+            path.unlink()
+            removed += 1
+        except Exception:
+            pass
+    return removed
 
 
 def parse_details_json(raw: str | None) -> dict[str, Any]:
