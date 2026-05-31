@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -222,17 +223,59 @@ class JobRunner:
         """Only real buyer inquiry rows — extract name/phone/message before counting a lead."""
         blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
+            try:
+                snippet = await page.evaluate(
+                    "() => (document.body.innerText || '').slice(0, 600)"
+                )
+                if re.search(
+                    r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
+                    snippet or "",
+                    re.I,
+                ):
+                    leads_url = job.target_url
+                    if "bltxn" not in (leads_url or "").lower():
+                        leads_url = INDIAMART_LEADS_URL
+                    await ensure_bltxn_leads_page(page, leads_url)
+                    blocks = await collect_buyer_lead_blocks(page)
+            except Exception:
+                pass
+        if not blocks:
+            diag = ""
+            try:
+                snippet = await page.evaluate(
+                    "() => (document.body.innerText || '').slice(0, 400)"
+                )
+                has_ago = bool(
+                    re.search(
+                        r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
+                        snippet,
+                        re.I,
+                    )
+                )
+                diag = f" body_has_time_ago={has_ago} preview={snippet[:200]!r}"
+            except Exception:
+                diag = ""
             logger.info(
                 "No buyer inquiry rows on page",
                 job_id=self.job_id,
                 url=page_url,
+                diagnostic=diag,
             )
             await self._log_event(
                 "scan_no_inquiry_rows",
-                "IndiaMART recent leads list empty or layout changed. Open bltxn manually to verify.",
+                "IndiaMART recent leads list empty or layout changed. Open bltxn manually to verify."
+                + diag,
                 EventSeverity.warning,
             )
             return
+
+        logger.info(
+            "Buyer inquiry rows detected",
+            job_id=self.job_id,
+            row_count=len(blocks),
+            url=page_url,
+            preview=blocks[0].text[:180] if blocks else "",
+        )
 
         best: tuple[BuyerLeadBlock, Any] | None = None
         for block in blocks:

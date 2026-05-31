@@ -1,4 +1,5 @@
 from app.automation.indiamart_leads import (
+    _blocks_from_body_text,
     is_buyer_inquiry_block,
     is_weak_match_context,
     lead_record_is_complete,
@@ -37,3 +38,37 @@ def test_lead_complete_with_time_and_location():
             "buyer_location": "New Delhi",
         },
     )
+
+
+def test_accepts_client_laser_welding_sold_out_row():
+    """Matches IndiaMART Recent feed row from client screenshot (Kheda, Sold Out)."""
+    text = (
+        "Laser Welding Machine\n"
+        "4 mins ago\n"
+        "Kheda, Gujarat\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(text)
+
+
+def test_accepts_mumbai_marking_machine_row():
+    text = (
+        "30W Laser Marking Machine\n"
+        "1 hr ago\n"
+        "Mumbai, Maharashtra\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(text)
+
+
+def test_body_split_finds_laser_leads():
+    body = (
+        "Recent\nLaser Welding Machine\n4 mins ago\nKheda, Gujarat\nSold Out!\n"
+        "I am Interested\n30W Laser Marking Machine\n1 hr ago\nMumbai, Maharashtra\n"
+        "Sold Out!\nI am Interested"
+    )
+    blocks = _blocks_from_body_text(body)
+    assert len(blocks) >= 2
+    assert any("Laser Welding" in b.text for b in blocks)

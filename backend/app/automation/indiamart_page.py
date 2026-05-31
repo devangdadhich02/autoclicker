@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from playwright.async_api import Page
@@ -78,6 +79,50 @@ async def wait_for_page_ready(page: Page, timeout_ms: int = 45_000) -> bool:
     return False
 
 
+async def click_recent_buy_leads_tab(page: Page) -> bool:
+    """Ensure the Recent (not Missed/All) buy-leads tab is active."""
+    patterns = (
+        re.compile(r"^recent\s*buy\s*leads?$", re.I),
+        re.compile(r"^recent$", re.I),
+        re.compile(r"buy\s*leads", re.I),
+    )
+    for pattern in patterns:
+        try:
+            loc = page.get_by_text(pattern)
+            n = await loc.count()
+            for i in range(min(n, 5)):
+                try:
+                    await loc.nth(i).click(timeout=5000)
+                    await page.wait_for_timeout(2000)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    try:
+        clicked = await page.evaluate(
+            """() => {
+              const want = ['recent buy leads', 'recent', 'buy leads'];
+              const nodes = [...document.querySelectorAll('a, button, span, div, li')];
+              for (const el of nodes) {
+                const t = (el.innerText || '').trim().toLowerCase();
+                if (!t || t.length > 40) continue;
+                if (want.some(w => t === w || t.startsWith(w))) {
+                  el.click();
+                  return true;
+                }
+              }
+              return false;
+            }"""
+        )
+        if clicked:
+            await page.wait_for_timeout(2000)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def scroll_lead_list(page: Page) -> None:
     """Load lazy-rendered IndiaMART lead rows."""
     try:
@@ -116,6 +161,17 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
     except Exception:
         pass
     await wait_for_page_ready(page)
+    await click_recent_buy_leads_tab(page)
+    try:
+        await page.wait_for_function(
+            """() => {
+              const t = document.body.innerText || '';
+              return /\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
+            }""",
+            timeout=15_000,
+        )
+    except Exception:
+        pass
     await scroll_lead_list(page)
 
 

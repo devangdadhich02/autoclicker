@@ -67,8 +67,14 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
 _LOCATION_RE = re.compile(
     r"\b(?:new\s+delhi|delhi|mumbai|bangalore|bengaluru|punjab|haryana|gujarat|"
     r"kolkata|chennai|hyderabad|noida|gurgaon|gurugram|uttar\s+pradesh|"
-    r"maharashtra|rajasthan)\b",
+    r"maharashtra|rajasthan|kheda|ahmedabad|surat|pune|jaipur|lucknow|"
+    r"indore|bhopal|kanpur|nagpur|thane|vadodara|coimbatore|kochi|"
+    r"kerala|tamil\s+nadu|karnataka|west\s+bengal|madhya\s+pradesh)\b",
     re.IGNORECASE,
+)
+# "Kheda, Gujarat" / "Mumbai, Maharashtra" style lines
+_CITY_STATE_RE = re.compile(
+    r"[A-Za-z][A-Za-z\s]{1,40},\s*[A-Za-z][A-Za-z\s]{2,30}",
 )
 
 _GENERIC_MATCH_WORDS = frozenset(
@@ -111,9 +117,22 @@ def is_seller_incoming_buy_lead(text: str) -> bool:
         return False
     if not _TIME_RE.search(t):
         return False
-    has_product_line = bool(re.search(r"[a-zA-Z]{4,}", t.split("\n")[0] if "\n" in t else t[:80]))
-    has_interest = "interested" in lower or "requirement" in lower or "category" in lower
-    has_loc = bool(_LOCATION_RE.search(t))
+    has_product_line = False
+    for line in t.splitlines():
+        line = line.strip()
+        if not line or _TIME_RE.fullmatch(line):
+            continue
+        if re.search(r"[a-zA-Z]{4,}", line) and len(line) > 5:
+            has_product_line = True
+            break
+    has_interest = (
+        "interested" in lower
+        or "requirement" in lower
+        or "category" in lower
+        or "sold out" in lower
+        or "business use" in lower
+    )
+    has_loc = bool(_LOCATION_RE.search(t)) or bool(_CITY_STATE_RE.search(t))
     return has_product_line and (has_interest or has_loc)
 
 
@@ -152,15 +171,84 @@ def lead_record_is_complete(block_text: str, lead: dict[str, str]) -> bool:
     return has_time and has_addr and has_product
 
 
-async def collect_buyer_lead_blocks(page: Page) -> list[BuyerLeadBlock]:
+async def _wait_for_lead_feed(page: Page, timeout_ms: int = 25_000) -> bool:
+    """Wait until recent-leads feed shows at least one time marker."""
+    try:
+        await page.wait_for_function(
+            """() => {
+              const t = document.body.innerText || '';
+              return /\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
+            }""",
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
+_TIME_LINE_RE = re.compile(
+    r"^\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago$",
+    re.IGNORECASE,
+)
+
+
+def _blocks_from_body_text(body: str, max_blocks: int = 40) -> list[BuyerLeadBlock]:
+    """Split full page text into lead chunks when DOM selectors miss cards."""
+    if not body or len(body) < 50:
+        return []
+    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    blocks: list[BuyerLeadBlock] = []
+    i = 0
+    while i < len(lines):
+        if not _TIME_LINE_RE.match(lines[i]):
+            i += 1
+            continue
+        start = max(0, i - 3)
+        while start < i and (
+            _TIME_LINE_RE.match(lines[start])
+            or len(lines[start]) < 3
+            or lines[start].lower() in ("recent", "buy leads", "all")
+        ):
+            start += 1
+        end = i + 1
+        while end < len(lines) and not _TIME_LINE_RE.match(lines[end]) and end - i < 14:
+            end += 1
+        text = "\n".join(lines[start:end])
+        if (
+            len(text) >= 30
+            and _TIME_RE.search(text)
+            and is_seller_incoming_buy_lead(text)
+        ):
+            blocks.append(
+                BuyerLeadBlock(text=text, row_index=len(blocks), selector="body-split")
+            )
+        i = end if end > i + 1 else i + 1
+        if len(blocks) >= max_blocks:
+            break
+    return blocks
+
+
+async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[BuyerLeadBlock]:
     await scroll_lead_list(page)
+    await _wait_for_lead_feed(page)
+    await scroll_lead_list(page)
+
     script = """
     (selectors) => {
+      const timeRe = /\\b\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago\\b/i;
       const out = [];
       const seen = new Set();
+      const push = (text, selector, rowIndex) => {
+        const t = (text || '').replace(/\\s+/g, ' ').trim();
+        if (t.length < 25 || t.length > 2500) return;
+        const key = t.slice(0, 140);
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ text: t, row_index: rowIndex, selector: selector || 'heuristic' });
+      };
       const roots = [
         '#leadList', '.byr-inqry-list', '.bltxn-list', '[class*="bltxn"]',
-        '[class*="inqry-list"]', 'main'
+        '[class*="inqry-list"]', 'main', 'body'
       ];
       const scopes = [];
       for (const r of roots) {
@@ -172,23 +260,30 @@ async def collect_buyer_lead_blocks(page: Page) -> list[BuyerLeadBlock]:
         for (const sel of selectors) {
           const nodes = scope.querySelectorAll(sel);
           nodes.forEach((el, idx) => {
-            const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
-            const key = text.slice(0, 140);
-            if (text.length < 35 || seen.has(key)) return;
-            if (!/ago\\b/i.test(text)) return;
-            seen.add(key);
-            out.push({ text, row_index: idx, selector: sel });
+            const raw = (el.innerText || el.textContent || '').trim();
+            if (!timeRe.test(raw)) return;
+            push(raw, sel, idx);
           });
         }
-        if (out.length >= 30) break;
       }
+      const cardSel = 'div, li, article, section, a, [class*="lead"], [class*="inqry"], [class*="bltxn"]';
+      document.querySelectorAll(cardSel).forEach((el, idx) => {
+        const raw = (el.innerText || '').trim();
+        if (!timeRe.test(raw)) return;
+        const lines = raw.split('\\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length < 2 || lines.length > 16) return;
+        if (raw.length < 30 || raw.length > 1400) return;
+        push(raw, 'card-heuristic', idx);
+      });
       return out;
     }
     """
+    raw: list = []
     try:
         raw = await page.evaluate(script, INQUIRY_ROW_SELECTORS)
     except Exception:
-        return []
+        raw = []
+
     blocks: list[BuyerLeadBlock] = []
     for item in raw or []:
         text = (item.get("text") or "").strip()
@@ -201,10 +296,41 @@ async def collect_buyer_lead_blocks(page: Page) -> list[BuyerLeadBlock]:
                 selector=item.get("selector") or INQUIRY_ROW_SELECTORS[0],
             )
         )
+        if len(blocks) >= max_blocks:
+            break
+
+    if not blocks:
+        try:
+            body = await page.evaluate("() => document.body.innerText || ''")
+        except Exception:
+            body = ""
+        blocks = _blocks_from_body_text(body, max_blocks)
+
     return blocks
 
 
+def _lead_title_for_click(block_text: str) -> str:
+    for line in block_text.splitlines():
+        line = line.strip()
+        if not line or _TIME_RE.search(line):
+            continue
+        lower = line.lower()
+        if lower in ("sold out!", "i am interested", "business use"):
+            continue
+        if len(line) >= 8 and re.search(r"[a-zA-Z]{3,}", line):
+            return line[:120]
+    return ""
+
+
 async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
+    title = _lead_title_for_click(block.text)
+    if block.selector in ("body-split", "card-heuristic", "heuristic") and title:
+        try:
+            await page.get_by_text(title, exact=False).first.click(timeout=8000)
+            await page.wait_for_timeout(3000)
+            return True
+        except Exception:
+            pass
     try:
         loc = page.locator(block.selector)
         count = await loc.count()
@@ -215,6 +341,13 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
         await page.wait_for_timeout(3000)
         return True
     except Exception:
+        if title:
+            try:
+                await page.get_by_text(title, exact=False).first.click(timeout=8000)
+                await page.wait_for_timeout(3000)
+                return True
+            except Exception:
+                return False
         return False
 
 
@@ -222,9 +355,9 @@ async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, s
     """Read open inquiry detail panel; regex fallback on visible text."""
     lead: dict[str, str] = {}
     if block_text:
-        lines = [ln.strip() for ln in block_text.splitlines() if ln.strip()]
-        if lines:
-            lead["product_title"] = lines[0][:200]
+        title = _lead_title_for_click(block_text)
+        if title:
+            lead["product_title"] = title[:200]
         lead["buyer_address"] = _parse_address_from_text(block_text)
         loc = _LOCATION_RE.search(block_text)
         if loc:
