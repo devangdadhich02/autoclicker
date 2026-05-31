@@ -49,8 +49,10 @@ export default function DashboardHome() {
   const [session, setSession] = useState<BrowserProfileStatus | null>(null)
   const [wsLive, setWsLive] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
-  const wsBackoffRef = useRef(1000)
+  const wsBackoffRef = useRef(3000)
   const wsUnmountRef = useRef(false)
+  const wsReplacingRef = useRef(false)
+  const wsReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     wsUnmountRef.current = false
@@ -58,7 +60,12 @@ export default function DashboardHome() {
     connectWs()
     return () => {
       wsUnmountRef.current = true
-      wsRef.current?.close()
+      if (wsReconnectTimerRef.current) {
+        clearTimeout(wsReconnectTimerRef.current)
+        wsReconnectTimerRef.current = null
+      }
+      wsReplacingRef.current = true
+      wsRef.current?.close(1000, 'Unmount')
       wsRef.current = null
     }
   }, [])
@@ -93,10 +100,20 @@ export default function DashboardHome() {
   }
 
   function connectWs() {
+    if (wsUnmountRef.current) return
     const token = useAuthStore.getState().accessToken
     if (!token) return
-    if (wsRef.current) {
-      wsRef.current.close()
+    const existing = wsRef.current
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN ||
+        existing.readyState === WebSocket.CONNECTING)
+    ) {
+      return
+    }
+    if (existing) {
+      wsReplacingRef.current = true
+      existing.close(1000, 'Reconnect')
       wsRef.current = null
     }
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -106,28 +123,28 @@ export default function DashboardHome() {
 
     ws.onopen = () => {
       setWsLive(true)
-      wsBackoffRef.current = 1000
+      wsBackoffRef.current = 3000
     }
     ws.onclose = async (ev) => {
       setWsLive(false)
-      if (wsUnmountRef.current) return
-      let nextToken = useAuthStore.getState().accessToken
+      if (wsUnmountRef.current || wsReplacingRef.current) {
+        wsReplacingRef.current = false
+        return
+      }
       if (ev.code === 4001) {
-        nextToken = await refreshAccessToken()
-        if (!nextToken) return
+        const fresh = await refreshAccessToken()
+        if (!fresh) return
       }
       const delay = wsBackoffRef.current
       wsBackoffRef.current = Math.min(delay * 2, 30_000)
-      setTimeout(() => {
+      if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current)
+      wsReconnectTimerRef.current = setTimeout(() => {
+        wsReconnectTimerRef.current = null
         if (!wsUnmountRef.current) connectWs()
       }, delay)
     }
     ws.onerror = () => {
-      try {
-        ws.close()
-      } catch {
-        /* ignore */
-      }
+      /* onclose handles reconnect */
     }
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
