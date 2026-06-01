@@ -319,11 +319,50 @@ def _lead_title_for_click(block_text: str) -> str:
             continue
         if len(line) >= 8 and re.search(r"[a-zA-Z]{3,}", line):
             return line[:120]
+    # Feed preview is often one line: "Product City, State 2 hrs ago Category > ..."
+    one = " ".join(block_text.split())
+    if not one or len(one) < 20:
+        return ""
+    m = _TIME_RE.search(one)
+    if m:
+        head = one[: m.start()].strip(" ,-|")
+        if len(head) >= 8:
+            loc = _CITY_STATE_RE.search(head)
+            if loc:
+                head = head[: loc.start()].strip(" ,-|")
+            if len(head) >= 8 and re.search(r"[a-zA-Z]{3,}", head):
+                return head[:120]
+    cat = re.search(r">\s*([^>]+?)(?:\s+Power\s*:|\s+Probable|\s*$)", one, re.I)
+    if cat and len(cat.group(1).strip()) >= 8:
+        return cat.group(1).strip()[:120]
     return ""
 
 
 async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
     title = _lead_title_for_click(block.text)
+    if title:
+        try:
+            clicked = await page.evaluate(
+                """(title) => {
+                  const t = title.toLowerCase().slice(0, 80);
+                  const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
+                  for (const el of nodes) {
+                    const raw = (el.innerText || '').trim();
+                    if (raw.length < 15 || raw.length > 1200) continue;
+                    if (!raw.toLowerCase().includes(t)) continue;
+                    if (!/\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i.test(raw)) continue;
+                    el.click();
+                    return true;
+                }
+                  return false;
+                }""",
+                title,
+            )
+            if clicked:
+                await page.wait_for_timeout(3000)
+                return True
+        except Exception:
+            pass
     if block.selector in ("body-split", "card-heuristic", "heuristic") and title:
         try:
             await page.get_by_text(title, exact=False).first.click(timeout=8000)

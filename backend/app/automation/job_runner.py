@@ -352,13 +352,13 @@ class JobRunner:
             return
 
         block, result = best
-        if not await click_buyer_lead_block(page, block):
+        clicked = await click_buyer_lead_block(page, block)
+        if not clicked:
             logger.warning(
-                "Could not open matched buyer row",
+                "Could not open matched buyer row — using feed text only",
                 job_id=self.job_id,
                 keyword=result.keyword_value,
             )
-            return
 
         lead = await extract_buyer_details(page, block.text)
         if not lead_record_is_complete(block.text, lead):
