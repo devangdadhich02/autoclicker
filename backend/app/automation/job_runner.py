@@ -13,9 +13,11 @@ from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
     BuyerLeadBlock,
     click_buyer_lead_block,
+    lead_has_buyer_contact,
     collect_buyer_lead_blocks,
     extract_buyer_details,
     is_weak_match_context,
+    lead_fingerprint,
     lead_record_is_complete,
 )
 from app.automation.profile_cookies import load_portable_cookies
@@ -81,6 +83,7 @@ class JobRunner:
         self._last_heartbeat: datetime | None = None
         self._poll_interval = settings.DEFAULT_POLL_INTERVAL_SECONDS
         self._browser_created_at: datetime | None = None
+        self._seen_lead_fingerprints: set[str] = set()
 
     @property
     def is_running(self) -> bool:
@@ -96,6 +99,20 @@ class JobRunner:
 
         logger.info("JobRunner starting", job_id=self.job_id)
         await self._update_status(JobStatus.running)
+        try:
+            job = await self._load_job()
+            from app.services.lead_store import load_seen_lead_fingerprints
+
+            self._seen_lead_fingerprints = load_seen_lead_fingerprints(
+                self.job_id, job.name
+            )
+            logger.info(
+                "Loaded lead dedup keys",
+                job_id=self.job_id,
+                count=len(self._seen_lead_fingerprints),
+            )
+        except Exception:
+            self._seen_lead_fingerprints = set()
 
         try:
             await self._run_loop()
@@ -352,6 +369,16 @@ class JobRunner:
             return
 
         block, result = best
+        pre_fp = lead_fingerprint(block.text, {})
+        if pre_fp in self._seen_lead_fingerprints:
+            logger.info(
+                "Duplicate lead skipped (already captured)",
+                job_id=self.job_id,
+                keyword=result.keyword_value,
+                fingerprint=pre_fp,
+            )
+            return
+
         clicked = await click_buyer_lead_block(page, block)
         if not clicked:
             logger.warning(
@@ -361,6 +388,28 @@ class JobRunner:
             )
 
         lead = await extract_buyer_details(page, block.text)
+        if not lead_has_buyer_contact(lead):
+            logger.warning(
+                "Buyer phone/email not revealed — lead skipped",
+                job_id=self.job_id,
+                keyword=result.keyword_value,
+                row_clicked=clicked,
+            )
+            await self._log_event(
+                "contact_not_revealed",
+                f"Matched '{result.keyword_value}' but could not reveal buyer contact. "
+                "Open lead manually on IndiaMART or check Buy Lead credits.",
+                EventSeverity.warning,
+                keyword_matched=result.keyword_value,
+                details={
+                    "block_preview": block.text[:500],
+                    "extracted": lead,
+                    "row_clicked": clicked,
+                },
+                job_name=job.name,
+                page_url=page_url,
+            )
+            return
         if not lead_record_is_complete(block.text, lead):
             logger.warning(
                 "Matched row rejected — not a complete buyer lead",
@@ -384,11 +433,22 @@ class JobRunner:
             )
             return
 
+        fp = lead_fingerprint(block.text, lead)
+        if fp in self._seen_lead_fingerprints:
+            logger.info(
+                "Duplicate lead skipped after contact extract",
+                job_id=self.job_id,
+                fingerprint=fp,
+            )
+            return
+        self._seen_lead_fingerprints.add(fp)
+
         details = {
             **lead,
             "keyword": result.keyword_value,
             "context_snippet": block.text[:500],
             "page_url": page_url,
+            "lead_fingerprint": fp,
         }
         msg = (
             f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
@@ -402,15 +462,7 @@ class JobRunner:
             keyword=result.keyword_value,
             phone=lead.get("buyer_phone"),
             product=lead.get("product_title"),
-        )
-        await self._log_event(
-            "keyword_detected",
-            msg,
-            EventSeverity.info,
-            keyword_matched=result.keyword_value,
-            details=details,
-            job_name=job.name,
-            page_url=page_url,
+            name=lead.get("buyer_name"),
         )
         await self._increment_lead()
         await self._log_event(

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from app.automation.indiamart_leads import lead_fingerprint
 from app.core.config import settings
 from app.core.logging import get_logger
 
@@ -35,6 +37,31 @@ _CSV_HEADERS = [
 def _job_csv_path(job_id: str, job_name: str) -> Path:
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in job_name)[:40]
     return settings.LEADS_CSV_DIR / f"{safe_name}_{job_id[:8]}_leads.csv"
+
+
+def load_seen_lead_fingerprints(job_id: str, job_name: str) -> set[str]:
+    """Fingerprints already saved for this job — avoids re-counting the same buyer row."""
+    path = _job_csv_path(job_id, job_name)
+    seen: set[str] = set()
+    if not path.exists():
+        return seen
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                phone = re.sub(r"\D", "", row.get("buyer_phone") or "")
+                if len(phone) >= 10:
+                    seen.add(f"ph:{phone[-10:]}")
+                    continue
+                email = (row.get("buyer_email") or "").strip().lower()
+                if email:
+                    seen.add(f"em:{email}")
+                    continue
+                snippet = row.get("context_snippet") or row.get("inquiry_message") or ""
+                if snippet:
+                    seen.add(lead_fingerprint(snippet, {}))
+    except Exception as exc:
+        logger.warning("Could not load lead fingerprints", path=str(path), error=str(exc))
+    return seen
 
 
 def append_lead_row(

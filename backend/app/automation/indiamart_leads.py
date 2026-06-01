@@ -159,9 +159,37 @@ def _parse_address_from_text(text: str) -> str:
     return loc.group(0) if loc else ""
 
 
+def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str:
+    """Stable key for dedup — phone/email best; else product + city (ignores 'X hrs ago')."""
+    lead = lead or {}
+    digits = re.sub(r"\D", "", lead.get("buyer_phone") or "")
+    if len(digits) >= 10:
+        return f"ph:{digits[-10:]}"
+    email = (lead.get("buyer_email") or "").strip().lower()
+    if email:
+        return f"em:{email}"
+    one = _TIME_RE.sub("", " ".join(block_text.split())).lower()
+    loc = _CITY_STATE_RE.search(block_text) or _LOCATION_RE.search(block_text)
+    city = (loc.group(0) if loc else "").lower().strip()
+    cat = re.search(r">\s*([^>]+?)(?:\s+power\s*:|\s+probable)", one, re.I)
+    product = cat.group(1).strip().lower()[:80] if cat else ""
+    if not product:
+        product = _lead_title_for_click(block_text).lower()[:80]
+    product = re.sub(r"\s+", " ", product).strip()
+    return f"pk:{product}|{city}"
+
+
+def lead_has_buyer_contact(lead: dict[str, str]) -> bool:
+    """Phone (or email) after opening lead / clicking reveal — required for actionable leads."""
+    phone = (lead.get("buyer_phone") or "").strip()
+    if phone and len(re.sub(r"\D", "", phone)) >= 10:
+        return True
+    return bool((lead.get("buyer_email") or "").strip())
+
+
 def lead_record_is_complete(block_text: str, lead: dict[str, str]) -> bool:
     """Real captured lead: contact info or full buyer row (product + address + time)."""
-    if lead.get("buyer_phone") or lead.get("buyer_email"):
+    if lead_has_buyer_contact(lead):
         return True
     if lead.get("buyer_name") and lead.get("product_title"):
         return True
@@ -338,6 +366,139 @@ def _lead_title_for_click(block_text: str) -> str:
     return ""
 
 
+_CONTACT_REVEAL_LABELS = (
+    "View Contact",
+    "View Mobile Number",
+    "View Mobile",
+    "Show Mobile Number",
+    "Show Number",
+    "Contact Buyer Now",
+    "Contact Buyer",
+    "View Number",
+    "Get Contact Details",
+    "Get Contact",
+    "Call Buyer",
+    "View Buyer Details",
+    "Contact Now",
+    "View Phone",
+)
+
+
+async def reveal_indiamart_buyer_contact(page: Page) -> bool:
+    """Click any detail-panel control that likely reveals buyer phone/name."""
+    clicked_any = False
+    for label in _CONTACT_REVEAL_LABELS:
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
+                n = await loc.count()
+                for i in range(min(n, 2)):
+                    try:
+                        el = loc.nth(i)
+                        await el.scroll_into_view_if_needed(timeout=3000)
+                        await el.click(timeout=4000)
+                        await page.wait_for_timeout(1800)
+                        clicked_any = True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+    try:
+        broad = page.locator("button, a, [role='button']").filter(
+            has_text=re.compile(
+                r"contact|mobile|phone|number|call|whatsapp|buyer|detail",
+                re.I,
+            )
+        )
+        n = await broad.count()
+        for i in range(min(n, 8)):
+            try:
+                el = broad.nth(i)
+                txt = (await el.inner_text(timeout=1500) or "").strip().lower()
+                if not txt or len(txt) > 55:
+                    continue
+                if re.search(
+                    r"interested|sold out|share|close|back|cancel|search|filter|login|sign in",
+                    txt,
+                ):
+                    continue
+                await el.scroll_into_view_if_needed(timeout=2000)
+                await el.click(timeout=4000)
+                await page.wait_for_timeout(1500)
+                clicked_any = True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        count = await page.evaluate(
+            """() => {
+              const skip = /interested|sold out|share|close|back|cancel|submit|search|filter|login|sign in|recent/i;
+              const want = /contact|mobile|phone|number|call|whatsapp|buyer|detail|view/i;
+              const roots = [
+                document.querySelector('[class*="detail"]'),
+                document.querySelector('[class*="Detail"]'),
+                document.querySelector('main'),
+                document.body,
+              ].filter(Boolean);
+              let clicked = 0;
+              for (const root of roots) {
+                for (const el of root.querySelectorAll('button, a, [role="button"], span, div')) {
+                  const t = (el.innerText || el.textContent || '').trim();
+                  if (t.length < 3 || t.length > 56 || skip.test(t)) continue;
+                  if (!want.test(t)) continue;
+                  const r = el.getBoundingClientRect();
+                  if (r.width < 2 || r.height < 2) continue;
+                  try {
+                    el.scrollIntoView({ block: 'center' });
+                    el.click();
+                    clicked++;
+                  } catch (e) {}
+                  if (clicked >= 6) return clicked;
+                }
+              }
+              return clicked;
+            }"""
+        )
+        if count and int(count) > 0:
+            clicked_any = True
+            await page.wait_for_timeout(2500)
+    except Exception:
+        pass
+    return clicked_any
+
+
+async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
+    """Pull phone/name from tel: links, inputs, and visible detail text."""
+    out: dict[str, str] = {}
+    try:
+        data = await page.evaluate(
+            """() => {
+              const phones = [];
+              const addPhone = (raw) => {
+                const d = (raw || '').replace(/\\D/g, '');
+                if (d.length >= 10) phones.push(d.slice(-10));
+              };
+              document.querySelectorAll('a[href^="tel:"]').forEach(a => addPhone(a.href));
+              document.querySelectorAll('input, textarea').forEach(inp => {
+                const v = (inp.value || '').trim();
+                if (/^\\+?\\d[\\d\\s-]{8,}$/.test(v)) addPhone(v);
+              });
+              const body = document.body.innerText || '';
+              const nameRe = /(?:buyer\\s*name|contact\\s*person|name)\\s*[:\\-]\\s*([A-Za-z][A-Za-z\\s.]{2,60})/i;
+              const nm = body.match(nameRe);
+              return { phones: [...new Set(phones)], name: nm ? nm[1].trim() : '' };
+            }"""
+        )
+        if data.get("phones"):
+            out["buyer_phone"] = str(data["phones"][0])
+        if data.get("name"):
+            out["buyer_name"] = str(data["name"])[:120]
+    except Exception:
+        pass
+    return out
+
+
 async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
     title = _lead_title_for_click(block.text)
     if title:
@@ -345,21 +506,33 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
             clicked = await page.evaluate(
                 """(title) => {
                   const t = title.toLowerCase().slice(0, 80);
+                  const timeRe = /\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
                   const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
+                  let best = null;
+                  let bestArea = Infinity;
                   for (const el of nodes) {
                     const raw = (el.innerText || '').trim();
-                    if (raw.length < 15 || raw.length > 1200) continue;
+                    if (raw.length < 15 || raw.length > 900) continue;
                     if (!raw.toLowerCase().includes(t)) continue;
-                    if (!/\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i.test(raw)) continue;
-                    el.click();
+                    if (!timeRe.test(raw)) continue;
+                    const r = el.getBoundingClientRect();
+                    const area = r.width * r.height;
+                    if (area > 0 && area < bestArea) {
+                      bestArea = area;
+                      best = el;
+                    }
+                  }
+                  if (best) {
+                    best.scrollIntoView({ block: 'center' });
+                    best.click();
                     return true;
-                }
+                  }
                   return false;
                 }""",
                 title,
             )
             if clicked:
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(3500)
                 return True
         except Exception:
             pass
@@ -390,8 +563,62 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
         return False
 
 
-async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, str]:
-    """Read open inquiry detail panel; regex fallback on visible text."""
+async def _read_detail_panel_text(page: Page) -> str:
+    panel_text = ""
+    for sel in (
+        ".inqry-detail-panel",
+        ".inquiry-detail",
+        ".byr-detail",
+        ".msg-detail-panel",
+        "[class*='detail-panel']",
+        "[class*='Detail']",
+        "[class*='detail']",
+        "main",
+    ):
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                panel_text = await loc.inner_text(timeout=4000)
+                if len(panel_text) > 80:
+                    return panel_text
+        except Exception:
+            continue
+    try:
+        return await page.evaluate("() => document.body.innerText || ''")
+    except Exception:
+        return panel_text
+
+
+def _parse_name_from_panel(text: str) -> str:
+    for pat in (
+        r"(?:buyer\s*name|contact\s*person|name)\s*[:\-]\s*([A-Za-z][A-Za-z\s.]{2,60})",
+        r"(?:member\s*since|buyer)\s*[:\-]?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
+    ):
+        m = re.search(pat, text, re.I)
+        if m:
+            name = m.group(1).strip()
+            if name.lower() not in ("business use", "probable requirement"):
+                return name[:120]
+    return ""
+
+
+def _apply_panel_text_to_lead(lead: dict[str, str], panel_text: str, block_text: str) -> None:
+    combined = f"{block_text}\n{panel_text}"
+    phones = _PHONE_RE.findall(combined)
+    if phones:
+        lead["buyer_phone"] = phones[0].replace(" ", "").replace("-", "")
+    emails = _EMAIL_RE.findall(combined)
+    if emails:
+        lead["buyer_email"] = emails[0]
+
+    if not lead.get("buyer_name"):
+        lead["buyer_name"] = _parse_name_from_panel(panel_text)
+
+
+async def extract_buyer_details(
+    page: Page, block_text: str = "", *, try_reveal_contact: bool = True
+) -> dict[str, str]:
+    """Open inquiry detail panel, click contact reveal, extract name/phone."""
     lead: dict[str, str] = {}
     if block_text:
         title = _lead_title_for_click(block_text)
@@ -404,39 +631,15 @@ async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, s
         if not lead.get("buyer_address"):
             lead["buyer_address"] = lead.get("buyer_location", "")
 
-    panel_text = ""
-    for sel in (
-        ".inqry-detail-panel",
-        ".inquiry-detail",
-        ".byr-detail",
-        ".msg-detail-panel",
-        "[class*='detail']",
-        "main",
-    ):
-        try:
-            loc = page.locator(sel).first
-            if await loc.count() > 0:
-                panel_text = await loc.inner_text(timeout=3000)
-                if len(panel_text) > 80:
-                    break
-        except Exception:
-            continue
-    if len(panel_text) < 80:
-        try:
-            panel_text = await page.evaluate("() => document.body.innerText || ''")
-        except Exception:
-            panel_text = ""
-
-    combined = f"{block_text}\n{panel_text}"
-    phones = _PHONE_RE.findall(combined)
-    if phones:
-        lead["buyer_phone"] = phones[0].replace(" ", "").replace("-", "")
-    emails = _EMAIL_RE.findall(combined)
-    if emails:
-        lead["buyer_email"] = emails[0]
+    panel_text = await _read_detail_panel_text(page)
+    _apply_panel_text_to_lead(lead, panel_text, block_text)
 
     for sel, field in (
         (".buyer-name, .byr-name, .contact-name, [class*='buyer'] [class*='name']", "buyer_name"),
+        (
+            ".buyer-phone, .byr-phone, .contact-phone, [class*='phone'], .phone-no",
+            "buyer_phone",
+        ),
         (".inqDesc, .inquiry-message, .msg-content, [class*='message']", "message"),
     ):
         try:
@@ -444,9 +647,49 @@ async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, s
             if await loc.count() > 0:
                 val = (await loc.inner_text(timeout=2000)).strip()
                 if val and len(val) < 500:
-                    lead[field] = val
+                    if field == "buyer_phone":
+                        digits = re.sub(r"\D", "", val)
+                        if len(digits) >= 10:
+                            lead[field] = digits[-10:] if len(digits) > 10 else digits
+                    else:
+                        lead[field] = val
         except Exception:
             continue
+
+    dom_contact = await _scrape_contact_from_dom(page)
+    if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
+        lead["buyer_phone"] = dom_contact["buyer_phone"]
+    if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
+        lead["buyer_name"] = dom_contact["buyer_name"]
+
+    if try_reveal_contact and not lead_has_buyer_contact(lead):
+        for _ in range(3):
+            if await reveal_indiamart_buyer_contact(page):
+                panel_text = await _read_detail_panel_text(page)
+                _apply_panel_text_to_lead(lead, panel_text, block_text)
+                dom_contact = await _scrape_contact_from_dom(page)
+                if dom_contact.get("buyer_phone"):
+                    lead["buyer_phone"] = dom_contact["buyer_phone"]
+                if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
+                    lead["buyer_name"] = dom_contact["buyer_name"]
+                for sel, field in (
+                    (".buyer-name, .byr-name, .contact-name", "buyer_name"),
+                    (".buyer-phone, .byr-phone, .contact-phone, .phone-no", "buyer_phone"),
+                ):
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.count() > 0:
+                            val = (await loc.inner_text(timeout=2000)).strip()
+                            if field == "buyer_phone":
+                                digits = re.sub(r"\D", "", val)
+                                if len(digits) >= 10:
+                                    lead[field] = digits[-10:] if len(digits) > 10 else digits
+                            elif val and len(val) < 120:
+                                lead[field] = val
+                    except Exception:
+                        continue
+            if lead_has_buyer_contact(lead):
+                break
 
     if not lead.get("message") and panel_text:
         for line in panel_text.splitlines():
@@ -455,6 +698,7 @@ async def extract_buyer_details(page: Page, block_text: str = "") -> dict[str, s
                 lead["message"] = line[:500]
                 break
 
+    combined = f"{block_text}\n{panel_text}"
     if not lead.get("buyer_location"):
         loc = _LOCATION_RE.search(combined)
         if loc:

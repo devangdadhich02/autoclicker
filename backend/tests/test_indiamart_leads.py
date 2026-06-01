@@ -2,6 +2,8 @@ from app.automation.indiamart_leads import (
     _blocks_from_body_text,
     is_buyer_inquiry_block,
     is_weak_match_context,
+    lead_fingerprint,
+    lead_has_buyer_contact,
     lead_record_is_complete,
 )
 from app.automation.indiamart_page import (
@@ -30,6 +32,26 @@ def test_lead_complete_with_phone():
         "Metal Laser Marking Machine\nNew Delhi · 10 mins ago",
         {"buyer_phone": "9876543210"},
     )
+
+
+def test_lead_has_contact_requires_phone():
+    assert lead_has_buyer_contact({"buyer_phone": "9876543210"})
+    assert not lead_has_buyer_contact({"buyer_name": "Raj", "buyer_location": "Pune"})
+
+
+def test_lead_fingerprint_ignores_time_ago():
+    block = (
+        "Laser Cleaning Machine Pune , Maharashtra 2 hrs ago "
+        "Oil & Stain Cleaner > Laser Cleaning Machine"
+    )
+    block2 = block.replace("2 hrs", "3 hrs")
+    assert lead_fingerprint(block, {}) == lead_fingerprint(block2, {})
+
+
+def test_lead_fingerprint_uses_phone_when_present():
+    block = "Laser Cleaning Machine Pune"
+    fp = lead_fingerprint(block, {"buyer_phone": "9876543210"})
+    assert fp == "ph:9876543210"
 
 
 def test_lead_complete_with_time_and_location():
