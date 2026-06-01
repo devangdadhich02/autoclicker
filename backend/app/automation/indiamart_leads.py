@@ -59,8 +59,27 @@ _BUYER_ROW_HINTS = (
 )
 
 _TIME_RE = re.compile(
-    r"\b\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago\b",
+    r"(?:\bjust\s+now\b|\b\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago\b)",
     re.IGNORECASE,
+)
+# Known IndiaMART header/support numbers scraped from seller nav (not buyers).
+_KNOWN_NAV_PHONES = frozenset({"9716054356", "9696969696", "18002008300"})
+_NAV_NAME_MARKERS = frozenset(
+    {
+        "tools",
+        "settings",
+        "tally",
+        "dashboard",
+        "profile",
+        "buy leads",
+        "lead manager",
+        "photos & docs",
+        "invoices",
+        "buyer tools",
+        "sign in",
+        "logout",
+        "help",
+    }
 )
 _PHONE_RE = re.compile(r"(?:\+91[\s-]?)?[6-9]\d{9}")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
@@ -179,10 +198,96 @@ def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str
     return f"pk:{product}|{city}"
 
 
+def sanitize_buyer_name(name: str) -> str:
+    """Drop sidebar/nav lines accidentally scraped as buyer name."""
+    if not name:
+        return ""
+    kept: list[str] = []
+    for line in name.splitlines():
+        line = line.strip()
+        if not line or len(line) > 80:
+            continue
+        low = line.lower()
+        if any(m in low for m in _NAV_NAME_MARKERS):
+            continue
+        if low in ("business use", "probable requirement type", "sold out!"):
+            continue
+        kept.append(line)
+    return " ".join(kept)[:120].strip()
+
+
+def normalize_phone_digits(phone: str) -> str:
+    d = re.sub(r"\D", "", phone or "")
+    if len(d) >= 10:
+        return d[-10:]
+    return ""
+
+
+def is_plausible_buyer_phone(
+    phone: str, block_text: str = "", panel_text: str = ""
+) -> bool:
+    """Reject seller nav / support numbers that appear on every page."""
+    d = normalize_phone_digits(phone)
+    if len(d) < 10:
+        return False
+    if d in _KNOWN_NAV_PHONES:
+        return False
+    panel = panel_text or ""
+    block = block_text or ""
+    panel_digits = re.sub(r"\D", "", panel)
+    block_digits = re.sub(r"\D", "", block)
+    if d in panel_digits and len(panel) > 40:
+        pl = panel.lower()
+        if any(
+            x in pl
+            for x in (
+                "buyer",
+                "contact",
+                "mobile",
+                "phone",
+                "member",
+                "view number",
+                "call buyer",
+            )
+        ):
+            return True
+    if d in block_digits and _TIME_RE.search(block):
+        bl = block.lower()
+        if any(
+            x in bl
+            for x in (
+                "interested",
+                "requirement",
+                "sold out",
+                "business use",
+                "category",
+                "laser",
+                "machine",
+            )
+        ):
+            return True
+    return False
+
+
+def sanitize_lead_contacts(
+    lead: dict[str, str], block_text: str = "", panel_text: str = ""
+) -> dict[str, str]:
+    """Clean name/phone fields before dedup and CSV export."""
+    out = dict(lead)
+    if out.get("buyer_name"):
+        out["buyer_name"] = sanitize_buyer_name(str(out["buyer_name"]))
+    phone = normalize_phone_digits(str(out.get("buyer_phone") or ""))
+    if phone and is_plausible_buyer_phone(phone, block_text, panel_text):
+        out["buyer_phone"] = phone
+    else:
+        out.pop("buyer_phone", None)
+    return out
+
+
 def lead_has_buyer_contact(lead: dict[str, str]) -> bool:
     """Phone (or email) after opening lead / clicking reveal — required for actionable leads."""
-    phone = (lead.get("buyer_phone") or "").strip()
-    if phone and len(re.sub(r"\D", "", phone)) >= 10:
+    phone = normalize_phone_digits(lead.get("buyer_phone") or "")
+    if phone and len(phone) >= 10:
         return True
     return bool((lead.get("buyer_email") or "").strip())
 
@@ -205,7 +310,7 @@ async def _wait_for_lead_feed(page: Page, timeout_ms: int = 25_000) -> bool:
         await page.wait_for_function(
             """() => {
               const t = document.body.innerText || '';
-              return /\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
+              return /just\\s+now|\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
             }""",
             timeout=timeout_ms,
         )
@@ -215,7 +320,7 @@ async def _wait_for_lead_feed(page: Page, timeout_ms: int = 25_000) -> bool:
 
 
 _TIME_LINE_RE = re.compile(
-    r"^\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago$",
+    r"^(?:just\s+now|\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago)$",
     re.IGNORECASE,
 )
 
@@ -239,7 +344,7 @@ def _blocks_from_body_text(body: str, max_blocks: int = 40) -> list[BuyerLeadBlo
         ):
             start += 1
         end = i + 1
-        while end < len(lines) and not _TIME_LINE_RE.match(lines[end]) and end - i < 14:
+        while end < len(lines) and not _TIME_LINE_RE.match(lines[end]) and end - i < 22:
             end += 1
         text = "\n".join(lines[start:end])
         if (
@@ -263,11 +368,11 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
 
     script = """
     (selectors) => {
-      const timeRe = /\\b\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago\\b/i;
+      const timeRe = /(?:\\bjust\\s+now\\b|\\b\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago\\b)/i;
       const out = [];
       const seen = new Set();
       const push = (text, selector, rowIndex) => {
-        const t = (text || '').replace(/\\s+/g, ' ').trim();
+        const t = (text || '').trim().replace(/\\n{3,}/g, '\\n');
         if (t.length < 25 || t.length > 2500) return;
         const key = t.slice(0, 140);
         if (seen.has(key)) return;
@@ -366,6 +471,12 @@ def _lead_title_for_click(block_text: str) -> str:
     return ""
 
 
+_INTEREST_BUTTON_LABELS = (
+    "I am Interested",
+    "I'm Interested",
+    "I Am Interested",
+)
+
 _CONTACT_REVEAL_LABELS = (
     "View Contact",
     "View Mobile Number",
@@ -387,6 +498,22 @@ _CONTACT_REVEAL_LABELS = (
 async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     """Click any detail-panel control that likely reveals buyer phone/name."""
     clicked_any = False
+    for label in _INTEREST_BUTTON_LABELS:
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
+                n = await loc.count()
+                for i in range(min(n, 2)):
+                    try:
+                        el = loc.nth(i)
+                        await el.scroll_into_view_if_needed(timeout=3000)
+                        await el.click(timeout=5000)
+                        await page.wait_for_timeout(2200)
+                        clicked_any = True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
     for label in _CONTACT_REVEAL_LABELS:
         for role in ("button", "link"):
             try:
@@ -506,7 +633,7 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
             clicked = await page.evaluate(
                 """(title) => {
                   const t = title.toLowerCase().slice(0, 80);
-                  const timeRe = /\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
+                  const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
                   const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
                   let best = null;
                   let bestArea = Infinity;
@@ -706,4 +833,4 @@ async def extract_buyer_details(
     if not lead.get("buyer_address"):
         lead["buyer_address"] = _parse_address_from_text(combined) or lead.get("buyer_location", "")
 
-    return lead
+    return sanitize_lead_contacts(lead, block_text, panel_text)

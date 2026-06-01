@@ -68,7 +68,7 @@ def is_indiamart_login_url(url: str) -> bool:
 
 
 _TIME_AGO_RE = re.compile(
-    r"\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago",
+    r"(?:just\s+now|\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\s*ago)",
     re.IGNORECASE,
 )
 _LOGGED_OUT_MARKERS = (
@@ -228,15 +228,51 @@ async def scroll_lead_list(page: Page) -> None:
     try:
         await page.evaluate(
             """async () => {
-              for (let i = 0; i < 4; i++) {
-                window.scrollBy(0, Math.max(400, window.innerHeight * 0.6));
-                await new Promise(r => setTimeout(r, 600));
+              const list = document.querySelector('#leadList, .byr-inqry-list, [class*="bltxn"]');
+              if (list && list.scrollHeight > list.clientHeight + 40) {
+                for (let i = 0; i < 6; i++) {
+                  list.scrollTop = list.scrollHeight;
+                  await new Promise(r => setTimeout(r, 500));
+                }
+                list.scrollTop = 0;
+              }
+              for (let i = 0; i < 8; i++) {
+                window.scrollBy(0, Math.max(400, window.innerHeight * 0.55));
+                await new Promise(r => setTimeout(r, 550));
               }
               window.scrollTo(0, 0);
             }"""
         )
     except Exception:
         pass
+
+
+async def open_buy_leads_main_panel(page: Page) -> bool:
+    """Click sidebar/main Buy Leads so SPA loads the recent feed (not nav-only chrome)."""
+    try:
+        clicked = await page.evaluate(
+            """() => {
+              const skip = /sign in|help|logout|products|photos|invoice|settings|tally/i;
+              const want = /^buy\\s*leads?$/i;
+              const nodes = [...document.querySelectorAll('a, button, span, div, li')];
+              for (const el of nodes) {
+                const t = (el.innerText || '').trim();
+                if (!t || t.length > 24 || skip.test(t)) continue;
+                if (!want.test(t)) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 8 || r.height < 8) continue;
+                el.click();
+                return true;
+              }
+              return false;
+            }"""
+        )
+        if clicked:
+            await page.wait_for_timeout(3500)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEADS_URL) -> None:
@@ -274,18 +310,20 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         except Exception:
             pass
         await wait_for_page_ready(page)
+        await open_buy_leads_main_panel(page)
         await click_recent_buy_leads_tab(page)
         try:
             await page.wait_for_function(
                 """() => {
                   const t = document.body.innerText || '';
-                  return /\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
+                  return /just\\s+now|\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
                 }""",
-                timeout=25_000,
+                timeout=30_000,
             )
         except Exception:
             pass
-        body = await read_indiamart_page_text(page, 8000)
+        await scroll_lead_list(page)
+        body = await read_indiamart_page_text(page, 12_000)
         if _TIME_AGO_RE.search(body) or not is_indiamart_marketing_landing(body):
             break
         if attempt == 0:

@@ -1,10 +1,13 @@
 from app.automation.indiamart_leads import (
     _blocks_from_body_text,
     is_buyer_inquiry_block,
+    is_plausible_buyer_phone,
     is_weak_match_context,
     lead_fingerprint,
     lead_has_buyer_contact,
     lead_record_is_complete,
+    sanitize_buyer_name,
+    sanitize_lead_contacts,
 )
 from app.automation.indiamart_page import (
     is_indiamart_logged_out_body,
@@ -115,6 +118,39 @@ def test_marketing_landing_detected():
         "Success Stories\nWhat can you sell"
     )
     assert is_indiamart_marketing_landing(body)
+
+
+def test_accepts_just_now_feed_row():
+    text = (
+        "Laser Welding Machine\n"
+        "Chennai, Tamil Nadu\n"
+        "Just Now\n"
+        "Category: Laser Welding Machine\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(text)
+
+
+def test_rejects_nav_support_phone():
+    assert not is_plausible_buyer_phone(
+        "9716054356",
+        "Laser Marking Machine\nJaipur, Rajasthan\n3 mins ago",
+        "Buy Leads\nLead Manager\nTools\nSettings",
+    )
+
+
+def test_sanitize_buyer_name_strips_nav():
+    assert sanitize_buyer_name("Tools\nSettings\nTally on") == ""
+    assert sanitize_buyer_name("Rajesh Kumar") == "Rajesh Kumar"
+
+
+def test_sanitize_lead_removes_bad_phone():
+    lead = sanitize_lead_contacts(
+        {"buyer_phone": "9716054356", "buyer_name": "Raj"},
+        "Laser Marking\nDelhi\n5 mins ago",
+        "Lead Manager\nBuy Leads",
+    )
+    assert "buyer_phone" not in lead
 
 
 def test_header_sign_in_not_logged_out_when_seller_ui_present():

@@ -29,11 +29,15 @@ from app.automation.indiamart_page import (
     is_indiamart_login_url,
     is_indiamart_marketing_landing,
     is_indiamart_seller_url,
+    open_first_lead_card,
     read_indiamart_page_text,
     scroll_lead_list,
     seller_session_is_authenticated,
     wait_for_page_ready,
 )
+
+# Cap leads processed per poll so contact reveal + heartbeat stay within watchdog budget.
+_MAX_LEADS_PER_SCAN = 5
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_session_factory
@@ -280,7 +284,7 @@ class JobRunner:
                     "() => (document.body.innerText || '').slice(0, 600)"
                 )
                 if re.search(
-                    r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
+                    r"(?:just\s+now|\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago)",
                     snippet or "",
                     re.I,
                 ):
@@ -292,6 +296,14 @@ class JobRunner:
             except Exception:
                 pass
         if not blocks:
+            leads_url = job.target_url
+            if "bltxn" not in (leads_url or "").lower():
+                leads_url = INDIAMART_LEADS_URL
+            await ensure_bltxn_leads_page(page, leads_url)
+            await open_first_lead_card(page)
+            await scroll_lead_list(page)
+            blocks = await collect_buyer_lead_blocks(page)
+        if not blocks:
             diag = ""
             snippet = ""
             has_ago = False
@@ -299,7 +311,7 @@ class JobRunner:
                 snippet = await read_indiamart_page_text(page)
                 has_ago = bool(
                     re.search(
-                        r"\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago",
+                        r"(?:just\s+now|\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago)",
                         snippet,
                         re.I,
                     )
@@ -338,7 +350,7 @@ class JobRunner:
             preview=blocks[0].text[:180] if blocks else "",
         )
 
-        best: tuple[BuyerLeadBlock, Any] | None = None
+        matches: list[tuple[BuyerLeadBlock, Any]] = []
         for block in blocks:
             block_results = self._detection.evaluate(block.text, keywords)
             if not block_results:
@@ -352,13 +364,9 @@ class JobRunner:
                     snippet=result.context_snippet[:120],
                 )
                 continue
-            if best is None or (result.priority, result.score) > (
-                best[1].priority,
-                best[1].score,
-            ):
-                best = (block, result)
+            matches.append((block, result))
 
-        if not best:
+        if not matches:
             logger.info(
                 "No keyword match in buyer rows",
                 job_id=self.job_id,
@@ -368,119 +376,140 @@ class JobRunner:
             )
             return
 
-        block, result = best
-        pre_fp = lead_fingerprint(block.text, {})
-        if pre_fp in self._seen_lead_fingerprints:
+        matches.sort(key=lambda m: (m[1].priority, m[1].score), reverse=True)
+        leads_url = job.target_url
+        if "bltxn" not in (leads_url or "").lower():
+            leads_url = INDIAMART_LEADS_URL
+
+        captured = 0
+        for block, result in matches[:_MAX_LEADS_PER_SCAN]:
+            await self._heartbeat()
+            pre_fp = lead_fingerprint(block.text, {})
+            if pre_fp in self._seen_lead_fingerprints:
+                logger.info(
+                    "Duplicate lead skipped (already captured)",
+                    job_id=self.job_id,
+                    keyword=result.keyword_value,
+                    fingerprint=pre_fp,
+                )
+                continue
+
+            if captured > 0:
+                await ensure_bltxn_leads_page(page, leads_url)
+                await scroll_lead_list(page)
+
+            clicked = await click_buyer_lead_block(page, block)
+            if not clicked:
+                logger.warning(
+                    "Could not open matched buyer row — using feed text only",
+                    job_id=self.job_id,
+                    keyword=result.keyword_value,
+                )
+
+            await self._heartbeat()
+            lead = await extract_buyer_details(page, block.text)
+            await self._heartbeat()
+            if not lead_has_buyer_contact(lead):
+                logger.warning(
+                    "Buyer phone/email not revealed — lead skipped",
+                    job_id=self.job_id,
+                    keyword=result.keyword_value,
+                    row_clicked=clicked,
+                )
+                await self._log_event(
+                    "contact_not_revealed",
+                    f"Matched '{result.keyword_value}' but could not reveal buyer contact. "
+                    "Open lead manually on IndiaMART or check Buy Lead credits.",
+                    EventSeverity.warning,
+                    keyword_matched=result.keyword_value,
+                    details={
+                        "block_preview": block.text[:500],
+                        "extracted": lead,
+                        "row_clicked": clicked,
+                    },
+                    job_name=job.name,
+                    page_url=page_url,
+                )
+                continue
+            if not lead_record_is_complete(block.text, lead):
+                logger.warning(
+                    "Matched row rejected — not a complete buyer lead",
+                    job_id=self.job_id,
+                    keyword=result.keyword_value,
+                    block_preview=block.text[:200],
+                    has_phone=bool(lead.get("buyer_phone")),
+                    has_name=bool(lead.get("buyer_name")),
+                )
+                await self._log_event(
+                    "lead_rejected",
+                    f"Keyword '{result.keyword_value}' matched page text but buyer details missing.",
+                    EventSeverity.warning,
+                    keyword_matched=result.keyword_value,
+                    details={
+                        "block_preview": block.text[:500],
+                        "extracted": lead,
+                    },
+                    job_name=job.name,
+                    page_url=page_url,
+                )
+                continue
+
+            fp = lead_fingerprint(block.text, lead)
+            if fp in self._seen_lead_fingerprints:
+                logger.info(
+                    "Duplicate lead skipped after contact extract",
+                    job_id=self.job_id,
+                    fingerprint=fp,
+                )
+                continue
+            self._seen_lead_fingerprints.add(fp)
+
+            details = {
+                **lead,
+                "keyword": result.keyword_value,
+                "context_snippet": block.text[:500],
+                "page_url": page_url,
+                "lead_fingerprint": fp,
+            }
+            msg = (
+                f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
+                f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
+                f"Phone: {lead.get('buyer_phone', 'N/A')} | "
+                f"Name: {lead.get('buyer_name', 'N/A')}"
+            )
             logger.info(
-                "Duplicate lead skipped (already captured)",
+                "Real buyer lead captured",
                 job_id=self.job_id,
                 keyword=result.keyword_value,
-                fingerprint=pre_fp,
+                phone=lead.get("buyer_phone"),
+                product=lead.get("product_title"),
+                name=lead.get("buyer_name"),
             )
-            return
-
-        clicked = await click_buyer_lead_block(page, block)
-        if not clicked:
-            logger.warning(
-                "Could not open matched buyer row — using feed text only",
-                job_id=self.job_id,
-                keyword=result.keyword_value,
-            )
-
-        lead = await extract_buyer_details(page, block.text)
-        if not lead_has_buyer_contact(lead):
-            logger.warning(
-                "Buyer phone/email not revealed — lead skipped",
-                job_id=self.job_id,
-                keyword=result.keyword_value,
-                row_clicked=clicked,
-            )
+            await self._increment_lead()
             await self._log_event(
-                "contact_not_revealed",
-                f"Matched '{result.keyword_value}' but could not reveal buyer contact. "
-                "Open lead manually on IndiaMART or check Buy Lead credits.",
-                EventSeverity.warning,
+                "lead_extracted",
+                msg,
+                EventSeverity.info,
                 keyword_matched=result.keyword_value,
-                details={
-                    "block_preview": block.text[:500],
-                    "extracted": lead,
-                    "row_clicked": clicked,
-                },
+                details=details,
                 job_name=job.name,
                 page_url=page_url,
             )
-            return
-        if not lead_record_is_complete(block.text, lead):
-            logger.warning(
-                "Matched row rejected — not a complete buyer lead",
-                job_id=self.job_id,
-                keyword=result.keyword_value,
-                block_preview=block.text[:200],
-                has_phone=bool(lead.get("buyer_phone")),
-                has_name=bool(lead.get("buyer_name")),
-            )
-            await self._log_event(
-                "lead_rejected",
-                f"Keyword '{result.keyword_value}' matched page text but buyer details missing.",
-                EventSeverity.warning,
-                keyword_matched=result.keyword_value,
-                details={
-                    "block_preview": block.text[:500],
-                    "extracted": lead,
-                },
-                job_name=job.name,
-                page_url=page_url,
-            )
-            return
+            captured += 1
 
-        fp = lead_fingerprint(block.text, lead)
-        if fp in self._seen_lead_fingerprints:
+            if action_rules:
+                action_engine = ActionEngine(self.job_id, browser)
+                action_engine._last_lead_data = lead
+                exec_results = await action_engine.execute_chain(action_rules)
+                success_count = sum(exec_results)
+                await self._increment_action(success_count)
+
+        if captured == 0:
             logger.info(
-                "Duplicate lead skipped after contact extract",
+                "No new leads saved this scan (duplicates or contact not revealed)",
                 job_id=self.job_id,
-                fingerprint=fp,
+                matched_rows=len(matches),
             )
-            return
-        self._seen_lead_fingerprints.add(fp)
-
-        details = {
-            **lead,
-            "keyword": result.keyword_value,
-            "context_snippet": block.text[:500],
-            "page_url": page_url,
-            "lead_fingerprint": fp,
-        }
-        msg = (
-            f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
-            f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
-            f"Phone: {lead.get('buyer_phone', 'N/A')} | "
-            f"Name: {lead.get('buyer_name', 'N/A')}"
-        )
-        logger.info(
-            "Real buyer lead captured",
-            job_id=self.job_id,
-            keyword=result.keyword_value,
-            phone=lead.get("buyer_phone"),
-            product=lead.get("product_title"),
-            name=lead.get("buyer_name"),
-        )
-        await self._increment_lead()
-        await self._log_event(
-            "lead_extracted",
-            msg,
-            EventSeverity.info,
-            keyword_matched=result.keyword_value,
-            details=details,
-            job_name=job.name,
-            page_url=page_url,
-        )
-
-        if action_rules:
-            action_engine = ActionEngine(self.job_id, browser)
-            action_engine._last_lead_data = lead
-            exec_results = await action_engine.execute_chain(action_rules)
-            success_count = sum(exec_results)
-            await self._increment_action(success_count)
 
     async def _handle_detection_results(
         self,
