@@ -38,6 +38,21 @@ _GENERIC_MATCH_WORDS = frozenset(
     }
 )
 
+_SEMANTIC_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
+    # IndiaMART often uses engraving/hallmarking where sellers configure marking.
+    "marking": ("marking", "engraving", "hallmarking", "etching", "engrave"),
+    "engraving": ("engraving", "marking", "hallmarking", "etching", "engrave"),
+    "hallmarking": ("hallmarking", "marking", "engraving"),
+}
+
+
+def _normalize_semantic_tokens(text: str) -> str:
+    out = text.lower()
+    for canonical, variants in _SEMANTIC_TOKEN_ALIASES.items():
+        for variant in variants:
+            out = re.sub(rf"\b{re.escape(variant)}\b", canonical, out)
+    return out
+
 
 @dataclass
 class DetectionResult:
@@ -119,15 +134,23 @@ class DetectionEngine:
         flags = 0 if case_sensitive else re.IGNORECASE
         t = term if case_sensitive else term.lower()
         body = text if case_sensitive else text.lower()
-        if t in body:
+        t_norm = _normalize_semantic_tokens(t)
+        body_norm = _normalize_semantic_tokens(body)
+        if t in body or t_norm in body_norm:
             return re.search(re.escape(term), text, flags)
         words = [w for w in re.findall(r"[a-z0-9]+", t) if len(w) >= 3]
         specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
         if len(specific) >= 2:
-            hits = [w for w in specific if w in body]
+            hits = [
+                w for w in specific
+                if w in body or _normalize_semantic_tokens(w) in body_norm
+            ]
             if len(hits) >= 2:
                 return re.search(re.escape(hits[0]), text, flags)
-        if len(specific) == 1 and specific[0] in body:
+        if len(specific) == 1 and (
+            specific[0] in body
+            or _normalize_semantic_tokens(specific[0]) in body_norm
+        ):
             return re.search(re.escape(specific[0]), text, flags)
         return None
 

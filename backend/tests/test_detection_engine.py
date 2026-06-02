@@ -47,6 +47,14 @@ def test_contains_no_match():
     assert len(results) == 0
 
 
+def test_contains_semantic_marking_matches_engraving():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw-semantic-1", "fiber laser metal marking machine")
+    text = "Buyer needs fiber laser metal engraving machine for steel parts"
+    results = engine.evaluate(text, [kw])
+    assert len(results) == 1
+
+
 def test_exact_match():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw2", "pipe", match_type=MatchType.exact)
