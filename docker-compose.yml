@@ -16,7 +16,9 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
     restart: unless-stopped
-    env_file: backend/.env
+    env_file:
+      - backend/.env
+      - backend/.env.docker
     volumes:
       - velora_data:/data
       # SSH upload from login.ps1 lands here — visible inside the container (no docker CLI needed for clients)
