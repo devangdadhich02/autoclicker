@@ -250,15 +250,34 @@ async def scroll_lead_list(page: Page) -> None:
 async def open_buy_leads_main_panel(page: Page) -> bool:
     """Click sidebar/main Buy Leads so SPA loads the recent feed (not nav-only chrome)."""
     try:
+        # Most reliable path: links that explicitly route to bltxn.
+        href_hit = await page.evaluate(
+            """() => {
+              const links = [...document.querySelectorAll('a[href*="bltxn"], a[href*="pref=recent"]')];
+              for (const a of links) {
+                const r = a.getBoundingClientRect();
+                if (r.width < 6 || r.height < 6) continue;
+                try { a.click(); return true; } catch (e) {}
+              }
+              return false;
+            }"""
+        )
+        if href_hit:
+            await page.wait_for_timeout(3000)
+            return True
+    except Exception:
+        pass
+    try:
         clicked = await page.evaluate(
             """() => {
               const skip = /sign in|help|logout|products|photos|invoice|settings|tally/i;
-              const want = /^buy\\s*leads?$/i;
+              const want = /buy\\s*leads?/i;
               const nodes = [...document.querySelectorAll('a, button, span, div, li')];
               for (const el of nodes) {
                 const t = (el.innerText || '').trim();
-                if (!t || t.length > 24 || skip.test(t)) continue;
-                if (!want.test(t)) continue;
+                if (!t || t.length > 36 || skip.test(t)) continue;
+                const compact = t.replace(/\\s+/g, '').toLowerCase();
+                if (!want.test(t) && !compact.startsWith('buyleads')) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width < 8 || r.height < 8) continue;
                 el.click();
@@ -324,6 +343,22 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
             pass
         await scroll_lead_list(page)
         body = await read_indiamart_page_text(page, 12_000)
+        nav_only = (
+            "buy leads" in body.lower()
+            and "dashboard" in body.lower()
+            and not _TIME_AGO_RE.search(body)
+        )
+        if nav_only:
+            # SPA sometimes lands on shell-only view (menu chrome). Force real route.
+            try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
+                await page.wait_for_timeout(3500)
+                await open_buy_leads_main_panel(page)
+                await click_recent_buy_leads_tab(page)
+                await scroll_lead_list(page)
+                body = await read_indiamart_page_text(page, 12_000)
+            except Exception:
+                pass
         if _TIME_AGO_RE.search(body) or not is_indiamart_marketing_landing(body):
             break
         if attempt == 0:
