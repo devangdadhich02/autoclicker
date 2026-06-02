@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 from typing import Any
 
 from playwright.async_api import Page
+
+logger = logging.getLogger(__name__)
 
 # Selectors for IndiaMART seller lead / inquiry UI (tried in order)
 INQUIRY_ROW_SELECTORS = [
@@ -280,6 +284,10 @@ async def open_buy_leads_main_panel(page: Page) -> bool:
                 if (!want.test(t) && !compact.startsWith('buyleads')) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width < 8 || r.height < 8) continue;
+                // React-friendly click sequence
+                el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
                 el.click();
                 return true;
               }
@@ -291,83 +299,297 @@ async def open_buy_leads_main_panel(page: Page) -> bool:
             return True
     except Exception:
         pass
+    
+    # Fallback to aggressive strategy
+    return await _aggressive_open_buy_leads(page)
+
+
+async def _aggressive_open_buy_leads(page: Page) -> bool:
+    """
+    Aggressive click simulation for React-based IndiaMART SPA.
+    Uses full event sequence (mouseenter, mousedown, mouseup, click) 
+    and tries multiple selector strategies.
+    """
+    
+    # Strategy 1: Direct href navigation via JS evaluation
+    try:
+        clicked = await page.evaluate(
+            """() => {
+              // Find Buy Leads links with specific patterns
+              const links = [...document.querySelectorAll('a')];
+              for (const a of links) {
+                const href = (a.getAttribute('href') || '').toLowerCase();
+                const text = (a.innerText || '').toLowerCase().trim();
+                
+                // Check for bltxn pattern in href or buy leads in text
+                if (href.includes('bltxn') || href.includes('pref=recent') ||
+                    text === 'buy leads' || text === 'recent buy leads' ||
+                    text.includes('buyleads')) {
+                  
+                  // Full click simulation for React
+                  const rect = a.getBoundingClientRect();
+                  if (rect.width < 6 || rect.height < 6) continue;
+                  
+                  // Dispatch full event sequence
+                  a.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                  a.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                  a.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+                  a.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+                  a.click();
+                  a.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                  
+                  return { success: true, method: 'full_event_sequence', text: a.innerText.slice(0, 50) };
+                }
+              }
+              return { success: false, method: 'none' };
+            }"""
+        )
+        if clicked and clicked.get('success'):
+            logger.info(f"Strategy 1 success: {clicked.get('text', 'unknown')}")
+            await page.wait_for_timeout(4000)
+            return True
+    except Exception as e:
+        logger.warning(f"Strategy 1 failed: {e}")
+    
+    # Strategy 2: Look for Buy Leads in sidebar navigation with specific class patterns
+    try:
+        clicked = await page.evaluate(
+            """() => {
+              const skipTerms = /sign\s*in|login|logout|help|settings|tally|products|photos|invoices/i;
+              const wantTerms = /buy\s*leads|recent\s*buy|buyleads|buy\s*lead/i;
+              
+              const candidates = [...document.querySelectorAll('a, button, [role="button"], [role="link"], li')];
+              
+              for (const el of candidates) {
+                const text = (el.innerText || el.textContent || '').trim();
+                if (!text || text.length > 40 || skipTerms.test(text)) continue;
+                
+                const cleanText = text.toLowerCase().replace(/\\s+/g, ' ');
+                if (wantTerms.test(cleanText)) {
+                  const rect = el.getBoundingClientRect();
+                  if (rect.width < 8 || rect.height < 8 || rect.top < 0 || rect.left < 0) continue;
+                  
+                  // Try React-friendly click
+                  el.focus();
+                  el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                  el.dispatchEvent(new Event('focus', { bubbles: true }));
+                  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+                  el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+                  el.click();
+                  
+                  return { success: true, text: text.slice(0, 50) };
+                }
+              }
+              return { success: false };
+            }"""
+        )
+        if clicked and clicked.get('success'):
+            logger.info(f"Strategy 2 success: {clicked.get('text', 'unknown')}")
+            await page.wait_for_timeout(4000)
+            return True
+    except Exception as e:
+        logger.warning(f"Strategy 2 failed: {e}")
+    
+    # Strategy 3: Use Playwright's native click with force option
+    try:
+        patterns = [
+            'a:has-text("Buy Leads")',
+            'a:has-text("Recent Buy Leads")',
+            '[class*="buy-lead"]',
+            '[class*="buyleads"]',
+            '[href*="bltxn"]',
+        ]
+        for pattern in patterns:
+            try:
+                loc = page.locator(pattern).first
+                if await loc.count() > 0:
+                    await loc.click(force=True, timeout=5000)
+                    logger.info(f"Strategy 3 success with pattern: {pattern}")
+                    await page.wait_for_timeout(4000)
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"Strategy 3 failed: {e}")
+    
+    # Strategy 4: Navigate directly via React Router if hash routing detected
+    try:
+        current_url = page.url or ""
+        if 'seller.indiamart.com' in current_url:
+            await page.evaluate(
+                """() => {
+                  // Try to use React Router navigation
+                  if (window.ReactRouter && window.ReactRouter.history) {
+                    window.ReactRouter.history.push('/bltxn?pref=recent');
+                  } else if (window.history && window.history.pushState) {
+                    window.history.pushState({}, '', '/bltxn/?pref=recent');
+                    // Dispatch popstate to trigger any listeners
+                    window.dispatchEvent(new PopStateEvent('popstate'));
+                  }
+                }"""
+            )
+            logger.info("Strategy 4: React Router navigation attempted")
+            await page.wait_for_timeout(4000)
+            return True
+    except Exception as e:
+        logger.warning(f"Strategy 4 failed: {e}")
+    
+    logger.warning("All aggressive strategies failed")
     return False
 
 
 async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEADS_URL) -> None:
     """Open recent buy leads with full URL + reload so persisted cookies apply."""
+    
     target = INDIAMART_LEADS_URL
     if "bltxn" in (fallback_url or "").lower():
         target = fallback_url
-    for attempt in range(2):
+    
+    for attempt in range(3):  # Increased to 3 attempts
+        logger.info(f"ensure_bltxn_leads_page attempt {attempt + 1}/3, target={target}")
+        
+        # Hard navigation with networkidle wait
         try:
-            await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
-        except Exception:
-            pass
-        if attempt == 1:
+            await page.goto(target, wait_until="networkidle", timeout=90_000)
+        except Exception as e:
+            logger.warning(f"networkidle navigation failed: {e}, trying domcontentloaded")
             try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
+            except Exception as e2:
+                logger.error(f"Navigation failed: {e2}")
+        
+        # If still no time markers, try dashboard home first then navigate
+        if attempt >= 1:
+            try:
+                logger.info("Trying dashboard-first navigation strategy")
                 await page.goto(
                     "https://seller.indiamart.com/",
-                    wait_until="domcontentloaded",
+                    wait_until="networkidle",
                     timeout=60_000,
                 )
-                await page.wait_for_timeout(2000)
-                await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
-            except Exception:
-                pass
-        try:
-            await page.wait_for_timeout(3000)
-            if "#" not in (page.url or ""):
+                await page.wait_for_timeout(3000)
+                # Use React Router hash navigation
                 await page.evaluate(
-                    f"() => {{ window.location.assign({json.dumps(target)}); }}"
+                    """() => {
+                        window.location.hash = '#/bltxn?pref=recent';
+                        // Trigger hashchange for React Router
+                        window.dispatchEvent(new HashChangeEvent('hashchange'));
+                    }"""
                 )
                 await page.wait_for_timeout(4000)
+                await page.goto(target, wait_until="networkidle", timeout=90_000)
+            except Exception as e:
+                logger.warning(f"Dashboard-first navigation failed: {e}")
+        
+        # Ensure proper URL with hash routing if needed
+        try:
+            await page.wait_for_timeout(2000)
+            current_url = page.url or ""
+            logger.info(f"Current URL after navigation: {current_url}")
+            
+            if "bltxn" not in current_url.lower():
+                logger.info("Forcing bltxn URL via window.location")
+                await page.evaluate(
+                    f"""() => {{
+                        window.location.href = '{target}';
+                    }}"""
+                )
+                await page.wait_for_timeout(4000)
+            
+            # Wait for network to be idle (API calls complete)
             try:
-                await page.wait_for_load_state("networkidle", timeout=25_000)
+                await page.wait_for_load_state("networkidle", timeout=20_000)
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"URL manipulation error: {e}")
+        
+        # Wait for page to be ready
         await wait_for_page_ready(page)
-        await open_buy_leads_main_panel(page)
-        await click_recent_buy_leads_tab(page)
+        
+        # Try to open Buy Leads panel with enhanced click simulation
+        panel_opened = await open_buy_leads_main_panel(page)
+        logger.info(f"Buy Leads panel opened: {panel_opened}")
+        
+        # Try to click Recent tab
+        recent_clicked = await click_recent_buy_leads_tab(page)
+        logger.info(f"Recent tab clicked: {recent_clicked}")
+        
+        # Wait for time markers to appear
+        time_markers_found = False
         try:
             await page.wait_for_function(
                 """() => {
                   const t = document.body.innerText || '';
                   return /just\\s+now|\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
                 }""",
-                timeout=30_000,
+                timeout=20_000,
             )
+            time_markers_found = True
+            logger.info("Time markers found in DOM")
         except Exception:
-            pass
+            logger.warning("Time markers not found within timeout")
+        
         await scroll_lead_list(page)
+        
+        # Check current state
         body = await read_indiamart_page_text(page, 12_000)
+        has_time_ago = bool(_TIME_AGO_RE.search(body))
+        logger.info(f"Page check - has_time_ago: {has_time_ago}, body_length: {len(body)}")
+        
         nav_only = (
             "buy leads" in body.lower()
             and "dashboard" in body.lower()
-            and not _TIME_AGO_RE.search(body)
+            and not has_time_ago
         )
+        
         if nav_only:
+            logger.warning("SPA stuck on nav-only view, forcing hard reload")
             # SPA sometimes lands on shell-only view (menu chrome). Force real route.
             try:
-                await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
-                await page.wait_for_timeout(3500)
-                await open_buy_leads_main_panel(page)
-                await click_recent_buy_leads_tab(page)
-                await scroll_lead_list(page)
-                body = await read_indiamart_page_text(page, 12_000)
-            except Exception:
-                pass
-        if _TIME_AGO_RE.search(body) or not is_indiamart_marketing_landing(body):
-            break
-        if attempt == 0:
-            try:
-                await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                # Hard reload with cache clear
+                await page.evaluate("() => { location.reload(true); }")
+                await page.wait_for_timeout(5000)
+                
+                # Re-navigate
+                await page.goto(target, wait_until="networkidle", timeout=90_000)
                 await page.wait_for_timeout(4000)
-            except Exception:
-                pass
+                
+                # Try aggressive panel opening
+                await _aggressive_open_buy_leads(page)
+                await scroll_lead_list(page)
+                
+                body = await read_indiamart_page_text(page, 12_000)
+                has_time_ago = bool(_TIME_AGO_RE.search(body))
+                logger.info(f"After hard reload - has_time_ago: {has_time_ago}")
+            except Exception as e:
+                logger.error(f"Hard reload failed: {e}")
+        
+        # If we have time markers or we're not on marketing landing, we're good
+        if has_time_ago:
+            logger.info("Success: Time markers found, breaking out of retry loop")
+            break
+            
+        if not is_indiamart_marketing_landing(body):
+            logger.info("Not on marketing landing, assuming logged in")
+            # Still try to get time markers one more time
+            if attempt < 2:
+                continue
+            break
+        
+        # Marketing landing detected, need to retry
+        logger.warning(f"Marketing landing detected on attempt {attempt + 1}")
+        
+        if attempt < 2:
+            logger.info(f"Retrying navigation (attempt {attempt + 2}/3)")
+            await asyncio.sleep(3)
+    
     await scroll_lead_list(page)
+    
+    # Final check
+    final_body = await read_indiamart_page_text(page, 8_000)
+    final_has_time = bool(_TIME_AGO_RE.search(final_body))
+    logger.info(f"ensure_bltxn_leads_page complete - final_has_time: {final_has_time}")
 
 
 async def seller_session_is_authenticated(page: Page) -> bool:
