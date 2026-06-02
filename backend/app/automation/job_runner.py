@@ -207,6 +207,20 @@ class JobRunner:
                 job_id=self.job_id,
             )
             return
+        logger.info(
+            "Active keywords loaded",
+            job_id=self.job_id,
+            count=len(keywords),
+            keywords=[
+                {
+                    "value": (k.value or "")[:80],
+                    "match_type": str(getattr(k, "match_type", "")),
+                    "active": bool(getattr(k, "is_active", False)),
+                    "case_sensitive": bool(getattr(k, "case_sensitive", False)),
+                }
+                for k in keywords[:20]
+            ],
+        )
 
         page_url = page.url
         if is_indiamart_seller_url(job.target_url):
@@ -372,6 +386,8 @@ class JobRunner:
                 job_id=self.job_id,
                 buyer_rows=len(blocks),
                 keyword_count=len(keywords),
+                row_previews=[b.text[:160] for b in blocks[:3]],
+                keywords=[(k.value or "")[:80] for k in keywords[:20]],
                 url=page_url,
             )
             return

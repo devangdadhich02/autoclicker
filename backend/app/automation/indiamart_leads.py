@@ -10,8 +10,8 @@ from app.automation.indiamart_page import (
     scroll_lead_list,
 )
 
-# Navigation / catalog text that must never count as a buyer lead
-_NON_LEAD_PHRASES = (
+# Hard navigation / catalog text that should never count as a buyer lead.
+_HARD_NON_LEAD_PHRASES = (
     "parts & spares",
     "parts and spares",
     "seller dashboard",
@@ -29,12 +29,16 @@ _NON_LEAD_PHRASES = (
     "business loan",
     "buying interests",
     "selling items",
-    "buyer viewed",
-    "you sell",
-    "you viewed",
     "member since",
-    "requirements ·",
-    "calls ·",
+)
+
+# Common UI labels seen inside real lead cards (do NOT hard-reject on these).
+_SOFT_LEAD_UI_PHRASES = (
+    "buyer viewed",
+    "you viewed",
+    "you sell",
+    "requirements",
+    "calls",
     "replies",
 )
 
@@ -132,9 +136,12 @@ def is_seller_incoming_buy_lead(text: str) -> bool:
     if len(t) < 35 or len(t) > 3000:
         return False
     lower = t.lower()
-    if any(p in lower for p in _NON_LEAD_PHRASES):
+    has_time = bool(_TIME_RE.search(t))
+    hard_hits = sum(1 for p in _HARD_NON_LEAD_PHRASES if p in lower)
+    # Navigation chunks often include many hard nav markers and no lead time marker.
+    if hard_hits >= 2 and not has_time:
         return False
-    if not _TIME_RE.search(t):
+    if not has_time:
         return False
     has_product_line = False
     for line in t.splitlines():
@@ -150,6 +157,7 @@ def is_seller_incoming_buy_lead(text: str) -> bool:
         or "category" in lower
         or "sold out" in lower
         or "business use" in lower
+        or any(p in lower for p in _SOFT_LEAD_UI_PHRASES)
     )
     has_loc = bool(_LOCATION_RE.search(t)) or bool(_CITY_STATE_RE.search(t))
     return has_product_line and (has_interest or has_loc)
@@ -158,7 +166,7 @@ def is_seller_incoming_buy_lead(text: str) -> bool:
 def is_weak_match_context(snippet: str, keyword: str) -> bool:
     """Reject matches that only hit generic catalog/nav words."""
     s = (snippet or "").lower()
-    if any(p in s for p in _NON_LEAD_PHRASES):
+    if sum(1 for p in _HARD_NON_LEAD_PHRASES if p in s) >= 2 and not _TIME_RE.search(snippet or ""):
         return True
     kw_words = [w for w in re.findall(r"[a-z0-9]+", keyword.lower()) if len(w) >= 3]
     specific = [w for w in kw_words if w not in _GENERIC_MATCH_WORDS]
