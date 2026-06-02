@@ -603,6 +603,24 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     return clicked_any
 
 
+async def _wait_for_contact_signal(page: Page, timeout_ms: int = 6000) -> bool:
+    """Wait briefly for any visible contact reveal signal in DOM."""
+    try:
+        await page.wait_for_function(
+            """() => {
+              const body = (document.body.innerText || '');
+              if (/(?:\\+91[\\s-]?)?[6-9]\\d{9}/.test(body)) return true;
+              if (/[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}/i.test(body)) return true;
+              if (document.querySelector('a[href^="tel:"], a[href^="mailto:"]')) return true;
+              return false;
+            }""",
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
 async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
     """Pull phone/name from tel: links, inputs, and visible detail text."""
     out: dict[str, str] = {}
@@ -798,8 +816,10 @@ async def extract_buyer_details(
         lead["buyer_name"] = dom_contact["buyer_name"]
 
     if try_reveal_contact and not lead_has_buyer_contact(lead):
-        for _ in range(3):
-            if await reveal_indiamart_buyer_contact(page):
+        for _ in range(4):
+            clicked_any = await reveal_indiamart_buyer_contact(page)
+            if clicked_any:
+                await _wait_for_contact_signal(page, timeout_ms=7000)
                 panel_text = await _read_detail_panel_text(page)
                 _apply_panel_text_to_lead(lead, panel_text, block_text)
                 dom_contact = await _scrape_contact_from_dom(page)
@@ -823,6 +843,42 @@ async def extract_buyer_details(
                                 lead[field] = val
                     except Exception:
                         continue
+            else:
+                # Fallback click pass inside probable details panel controls.
+                try:
+                    clicked = await page.evaluate(
+                        """() => {
+                          const panel = document.querySelector('[class*="detail"], [class*="inqry"], [class*="byr"]') || document.body;
+                          const want = /view|contact|mobile|phone|number|call|whatsapp/i;
+                          const deny = /close|cancel|back|share|login|sign in|filter|search/i;
+                          let count = 0;
+                          for (const el of panel.querySelectorAll('button, a, [role="button"], span, div')) {
+                            const t = (el.innerText || el.textContent || '').trim();
+                            if (!t || t.length < 3 || t.length > 50) continue;
+                            if (!want.test(t) || deny.test(t)) continue;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 2 || r.height < 2) continue;
+                            try {
+                              el.click();
+                              count++;
+                            } catch (e) {}
+                            if (count >= 4) break;
+                          }
+                          return count;
+                        }"""
+                    )
+                    if clicked and int(clicked) > 0:
+                        await page.wait_for_timeout(1800)
+                        await _wait_for_contact_signal(page, timeout_ms=5000)
+                        panel_text = await _read_detail_panel_text(page)
+                        _apply_panel_text_to_lead(lead, panel_text, block_text)
+                        dom_contact = await _scrape_contact_from_dom(page)
+                        if dom_contact.get("buyer_phone"):
+                            lead["buyer_phone"] = dom_contact["buyer_phone"]
+                        if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
+                            lead["buyer_name"] = dom_contact["buyer_name"]
+                except Exception:
+                    pass
             if lead_has_buyer_contact(lead):
                 break
 

@@ -398,6 +398,7 @@ class JobRunner:
             leads_url = INDIAMART_LEADS_URL
 
         captured = 0
+        partial_saved = 0
         for block, result in matches[:_MAX_LEADS_PER_SCAN]:
             await self._heartbeat()
             pre_fp = lead_fingerprint(block.text, {})
@@ -459,6 +460,7 @@ class JobRunner:
                         job_name=job.name,
                         page_url=page_url,
                     )
+                    partial_saved += 1
                 await self._log_event(
                     "contact_not_revealed",
                     f"Matched '{result.keyword_value}' but could not reveal buyer contact. "
@@ -547,11 +549,18 @@ class JobRunner:
                 success_count = sum(exec_results)
                 await self._increment_action(success_count)
 
-        if captured == 0:
+        if captured == 0 and partial_saved == 0:
             logger.info(
                 "No new leads saved this scan (duplicates or contact not revealed)",
                 job_id=self.job_id,
                 matched_rows=len(matches),
+            )
+        elif captured == 0 and partial_saved > 0:
+            logger.info(
+                "Partial leads saved this scan (contact not revealed)",
+                job_id=self.job_id,
+                matched_rows=len(matches),
+                partial_saved=partial_saved,
             )
 
     async def _handle_detection_results(
