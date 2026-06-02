@@ -427,11 +427,38 @@ class JobRunner:
             await self._heartbeat()
             if not lead_has_buyer_contact(lead):
                 logger.warning(
-                    "Buyer phone/email not revealed — lead skipped",
+                    "Buyer phone/email not revealed — lead saved as partial",
                     job_id=self.job_id,
                     keyword=result.keyword_value,
                     row_clicked=clicked,
                 )
+                # Persist partial lead so matched inquiries are not completely lost.
+                partial_fp = f"partial:{pre_fp}"
+                if partial_fp not in self._seen_lead_fingerprints:
+                    self._seen_lead_fingerprints.add(partial_fp)
+                    partial_details = {
+                        **lead,
+                        "keyword": result.keyword_value,
+                        "context_snippet": block.text[:500],
+                        "page_url": page_url,
+                        "lead_fingerprint": partial_fp,
+                        "contact_revealed": False,
+                    }
+                    partial_msg = (
+                        f"Partial buyer lead — {lead.get('product_title', result.keyword_value)} | "
+                        f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
+                        "Contact not revealed on IndiaMART"
+                    )
+                    await self._increment_lead()
+                    await self._log_event(
+                        "lead_extracted",
+                        partial_msg,
+                        EventSeverity.warning,
+                        keyword_matched=result.keyword_value,
+                        details=partial_details,
+                        job_name=job.name,
+                        page_url=page_url,
+                    )
                 await self._log_event(
                     "contact_not_revealed",
                     f"Matched '{result.keyword_value}' but could not reveal buyer contact. "

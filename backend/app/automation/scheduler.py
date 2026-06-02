@@ -26,6 +26,10 @@ class AutomationScheduler:
 
     async def start_job(self, job_id: str) -> None:
         async with self._lock:
+            existing_task = self._tasks.get(job_id)
+            if existing_task and not existing_task.done():
+                logger.warning("Job already starting/running", job_id=job_id)
+                return
             if job_id in self._runners and self._runners[job_id].is_running:
                 logger.warning("Job already running", job_id=job_id)
                 return
@@ -63,12 +67,19 @@ class AutomationScheduler:
             logger.info("Job stopped", job_id=job_id)
 
     async def restart_job(self, job_id: str) -> None:
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            logger.info("Restart skipped — job already active", job_id=job_id)
+            return
         logger.info("Restarting job", job_id=job_id)
         await self.stop_job(job_id)
         await asyncio.sleep(2)
         await self.start_job(job_id)
 
     def is_running(self, job_id: str) -> bool:
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            return True
         runner = self._runners.get(job_id)
         return runner is not None and runner.is_running
 

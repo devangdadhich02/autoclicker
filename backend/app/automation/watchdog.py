@@ -52,6 +52,16 @@ class WatchdogService:
         for job in running_jobs:
             if job.last_heartbeat is None:
                 continue
+            # Ignore stale heartbeat carried over from previous process/runtime.
+            # If the job was just updated recently, runner may be booting and has
+            # not recorded first heartbeat in this process yet.
+            updated_at = job.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            if (now - updated_at).total_seconds() < max(
+                90, int(settings.WATCHDOG_CHECK_INTERVAL_SECONDS * 2)
+            ):
+                continue
             elapsed = (now - job.last_heartbeat.replace(tzinfo=UTC)).total_seconds()
             if elapsed > settings.HEARTBEAT_TIMEOUT_SECONDS:
                 logger.warning(
