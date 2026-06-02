@@ -354,7 +354,7 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
     # Strategy 2: Look for Buy Leads in sidebar navigation with specific class patterns
     try:
         clicked = await page.evaluate(
-            """() => {
+            r"""() => {
               const skipTerms = /sign\s*in|login|logout|help|settings|tally|products|photos|invoices/i;
               const wantTerms = /buy\s*leads|recent\s*buy|buyleads|buy\s*lead/i;
               
@@ -364,7 +364,7 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
                 const text = (el.innerText || el.textContent || '').trim();
                 if (!text || text.length > 40 || skipTerms.test(text)) continue;
                 
-                const cleanText = text.toLowerCase().replace(/\\s+/g, ' ');
+                const cleanText = text.toLowerCase().replace(/\s+/g, ' ');
                 if (wantTerms.test(cleanText)) {
                   const rect = el.getBoundingClientRect();
                   if (rect.width < 8 || rect.height < 8 || rect.top < 0 || rect.left < 0) continue;
