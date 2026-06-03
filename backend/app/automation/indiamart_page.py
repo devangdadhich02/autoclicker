@@ -445,16 +445,19 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
     if "bltxn" in (fallback_url or "").lower():
         target = fallback_url
     
-    for attempt in range(3):  # Increased to 3 attempts
+    for attempt in range(3):  # 3 attempts with increasing delays
         logger.info(f"ensure_bltxn_leads_page attempt {attempt + 1}/3, target={target}")
         
-        # Hard navigation with networkidle wait
+        # Primary: domcontentloaded (faster, more reliable for IndiaMART SPA)
+        # Fallback: networkidle only if DOM looks incomplete
         try:
-            await page.goto(target, wait_until="networkidle", timeout=90_000)
+            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+            # Short wait for React to hydrate
+            await page.wait_for_timeout(2000)
         except Exception as e:
-            logger.warning(f"networkidle navigation failed: {e}, trying domcontentloaded")
+            logger.warning(f"domcontentloaded navigation failed: {e}, trying networkidle")
             try:
-                await page.goto(target, wait_until="domcontentloaded", timeout=90_000)
+                await page.goto(target, wait_until="networkidle", timeout=45_000)
             except Exception as e2:
                 logger.error(f"Navigation failed: {e2}")
         
@@ -462,12 +465,13 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         if attempt >= 1:
             try:
                 logger.info("Trying dashboard-first navigation strategy")
+                # Load dashboard with shorter timeout
                 await page.goto(
                     "https://seller.indiamart.com/",
-                    wait_until="networkidle",
-                    timeout=60_000,
+                    wait_until="domcontentloaded",
+                    timeout=30_000,
                 )
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(2000)
                 # Use React Router hash navigation
                 await page.evaluate(
                     """() => {
@@ -476,8 +480,10 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
                         window.dispatchEvent(new HashChangeEvent('hashchange'));
                     }"""
                 )
-                await page.wait_for_timeout(4000)
-                await page.goto(target, wait_until="networkidle", timeout=90_000)
+                await page.wait_for_timeout(3000)
+                # Final load with domcontentloaded
+                await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(1500)
             except Exception as e:
                 logger.warning(f"Dashboard-first navigation failed: {e}")
         
@@ -549,11 +555,11 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
             try:
                 # Hard reload with cache clear
                 await page.evaluate("() => { location.reload(true); }")
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(3000)
                 
-                # Re-navigate
-                await page.goto(target, wait_until="networkidle", timeout=90_000)
-                await page.wait_for_timeout(4000)
+                # Re-navigate with domcontentloaded (faster)
+                await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(2000)
                 
                 # Try aggressive panel opening
                 await _aggressive_open_buy_leads(page)
