@@ -37,7 +37,7 @@ from app.automation.indiamart_page import (
 )
 
 # Cap leads processed per poll so contact reveal + heartbeat stay within watchdog budget.
-_MAX_LEADS_PER_SCAN = 5
+_MAX_LEADS_PER_SCAN = 10
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_session_factory

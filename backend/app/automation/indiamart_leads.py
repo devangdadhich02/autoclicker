@@ -685,14 +685,14 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                 title,
             )
             if clicked:
-                await page.wait_for_timeout(3500)
+                await page.wait_for_timeout(1500)
                 return True
         except Exception:
             pass
     if block.selector in ("body-split", "card-heuristic", "heuristic") and title:
         try:
-            await page.get_by_text(title, exact=False).first.click(timeout=8000)
-            await page.wait_for_timeout(3000)
+            await page.get_by_text(title, exact=False).first.click(timeout=5000)
+            await page.wait_for_timeout(1500)
             return True
         except Exception:
             pass
@@ -703,13 +703,13 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
             await loc.first.click(timeout=8000)
         else:
             await loc.nth(block.row_index).click(timeout=8000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(1500)
         return True
     except Exception:
         if title:
             try:
-                await page.get_by_text(title, exact=False).first.click(timeout=8000)
-                await page.wait_for_timeout(3000)
+                await page.get_by_text(title, exact=False).first.click(timeout=5000)
+                await page.wait_for_timeout(1500)
                 return True
             except Exception:
                 return False

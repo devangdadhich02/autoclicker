@@ -130,28 +130,53 @@ class DetectionEngine:
     def _flexible_contains(
         self, term: str, text: str, case_sensitive: bool
     ) -> re.Match[str] | None:
-        """Fallback when exact substring fails (spacing/casing/product title variants)."""
+        """Fallback when exact substring fails (spacing/casing/product title variants).
+        
+        CRITICAL: Only match if ALL significant words from term are present in text.
+        Prevents partial matches like "laser marking" matching "laser engraving".
+        """
         flags = 0 if case_sensitive else re.IGNORECASE
         t = term if case_sensitive else term.lower()
         body = text if case_sensitive else text.lower()
         t_norm = _normalize_semantic_tokens(t)
         body_norm = _normalize_semantic_tokens(body)
+        
+        # First check: exact phrase match (normalized)
         if t in body or t_norm in body_norm:
             return re.search(re.escape(term), text, flags)
+        
+        # Get all words from term (3+ chars)
         words = [w for w in re.findall(r"[a-z0-9]+", t) if len(w) >= 3]
+        if not words:
+            return None
+            
+        # Filter out generic words to get specific/product words
         specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
-        if len(specific) >= 2:
+        
+        # CRITICAL FIX: Require ALL specific words to match, not just some
+        # This prevents "laser marking" from matching "laser engraving"
+        if specific:
+            # Check if ALL specific words are present
+            all_specific_match = all(
+                w in body or _normalize_semantic_tokens(w) in body_norm
+                for w in specific
+            )
+            if not all_specific_match:
+                return None
+            # All specific words found - return match for first word
+            return re.search(re.escape(specific[0]), text, flags)
+        
+        # If no specific words (all generic like "laser marking machine"), 
+        # require at least 2 words to match to reduce false positives
+        if len(words) >= 2:
             hits = [
-                w for w in specific
+                w for w in words
                 if w in body or _normalize_semantic_tokens(w) in body_norm
             ]
-            if len(hits) >= 2:
-                return re.search(re.escape(hits[0]), text, flags)
-        if len(specific) == 1 and (
-            specific[0] in body
-            or _normalize_semantic_tokens(specific[0]) in body_norm
-        ):
-            return re.search(re.escape(specific[0]), text, flags)
+            # Require ALL words to match for generic phrases
+            if len(hits) == len(words):
+                return re.search(re.escape(words[0]), text, flags)
+        
         return None
 
     def evaluate_blocks(self, text: str, keywords: list[Any]) -> list[DetectionResult]:

@@ -53,9 +53,9 @@ class Settings(BaseSettings):
 
     # ── Automation ──────────────────────────────────────────────────────────
     MAX_CONCURRENT_JOBS: int = 5
-    DEFAULT_POLL_INTERVAL_SECONDS: int = 15
+    DEFAULT_POLL_INTERVAL_SECONDS: int = 5
     ACTION_RETRY_ATTEMPTS: int = 3
-    ACTION_RETRY_DELAY_SECONDS: float = 2.0
+    ACTION_RETRY_DELAY_SECONDS: float = 1.0
     WATCHDOG_CHECK_INTERVAL_SECONDS: int = 30
     HEARTBEAT_TIMEOUT_SECONDS: int = 300
 
