@@ -59,7 +59,7 @@ if (-not $pythonCmd) {
 # Always use latest upload script from GitHub (fixes server path issues)
 $scriptFile = Join-Path (Get-Location) "login_local_and_upload.py"
 Write-Host "Downloading latest upload script..." -ForegroundColor Yellow
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/devangdadhich02/autoclicker/main/scripts/login_local_and_upload.py" -OutFile $scriptFile
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/devangdadhich02/autoclicker/feat/new/scripts/login_local_and_upload.py" -OutFile $scriptFile
 
 # Install dependencies
 Write-Host "Installing dependencies (one-time)..." -ForegroundColor Yellow

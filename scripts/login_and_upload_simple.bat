@@ -26,11 +26,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM Check if script exists
-if not exist "login_local_and_upload.py" (
-    echo Downloading required files...
-    curl -o login_local_and_upload.py https://raw.githubusercontent.com/devangdadhich02/autoclicker/main/scripts/login_local_and_upload.py
-)
+REM Always download latest upload script from the deployment branch
+echo Downloading latest upload script...
+curl -o login_local_and_upload.py https://raw.githubusercontent.com/devangdadhich02/autoclicker/feat/new/scripts/login_local_and_upload.py
 
 REM Install dependencies
 echo Installing dependencies...

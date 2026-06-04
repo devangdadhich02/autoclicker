@@ -19,6 +19,7 @@ from playwright.async_api import (
 from app.automation.profile_cookies import (
     load_portable_cookies,
     load_portable_storage_state,
+    storage_state_file,
 )
 from app.core.config import settings
 from app.core.exceptions import BrowserError
@@ -144,6 +145,15 @@ class BrowserManager:
         state = load_portable_storage_state(self.profile_path)
         origins = state.get("origins") if isinstance(state, dict) else None
         if not origins or self._context is None:
+            if self.profile_name == "indiamart" and not storage_state_file(
+                self.profile_path
+            ).is_file():
+                logger.warning(
+                    "Portable browser storage state missing — re-run latest login.ps1",
+                    job_id=self.job_id,
+                    profile=self.profile_name,
+                    expected_path=str(storage_state_file(self.profile_path)),
+                )
             return
         try:
             await self._context.add_init_script(
