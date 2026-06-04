@@ -123,11 +123,12 @@ async def export_logs_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow([
+    headers = [
         "created_at", "job_id", "severity", "event_type", "message", "keyword_matched",
         "product_title", "buyer_name", "buyer_phone", "buyer_email",
         "buyer_location", "buyer_address", "inquiry_message", "context_snippet", "page_url",
-    ])
+    ]
+    writer.writerow(headers)
     for log in logs:
         details: dict = {}
         if log.details:
@@ -136,23 +137,26 @@ async def export_logs_csv(
             except Exception:
                 pass
 
-        writer.writerow([
-            log.created_at.isoformat() if log.created_at else "",
-            log.job_id or "",
-            log.severity,
-            log.event_type,
-            log.message,
-            log.keyword_matched or "",
-            details.get("product_title", ""),
-            details.get("buyer_name", ""),
-            details.get("buyer_phone", ""),
-            details.get("buyer_email", ""),
-            details.get("buyer_location", ""),
-            details.get("buyer_address", ""),
-            details.get("message", details.get("inquiry_message", details.get("text", ""))),
-            details.get("context_snippet", ""),
-            details.get("page_url", ""),
-        ])
+        # Build row dict to ensure column alignment
+        row_data = {
+            "created_at": log.created_at.isoformat() if log.created_at else "",
+            "job_id": log.job_id or "",
+            "severity": log.severity.value if hasattr(log.severity, 'value') else str(log.severity),
+            "event_type": log.event_type,
+            "message": log.message or "",
+            "keyword_matched": log.keyword_matched or "",
+            "product_title": details.get("product_title", ""),
+            "buyer_name": details.get("buyer_name", ""),
+            "buyer_phone": details.get("buyer_phone", ""),
+            "buyer_email": details.get("buyer_email", ""),
+            "buyer_location": details.get("buyer_location", ""),
+            "buyer_address": details.get("buyer_address", ""),
+            "inquiry_message": details.get("message", details.get("inquiry_message", details.get("text", ""))),
+            "context_snippet": details.get("context_snippet", ""),
+            "page_url": details.get("page_url", ""),
+        }
+        # Write in header order
+        writer.writerow([row_data.get(h, "") for h in headers])
 
     output.seek(0)
     filename = f"velora_logs_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -188,11 +192,12 @@ async def export_leads_csv(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow([
+    headers = [
         "created_at", "job_id", "event_type", "keyword_matched", "message",
         "product_title", "buyer_name", "buyer_phone", "buyer_email",
         "buyer_location", "buyer_address", "inquiry_message", "context_snippet", "page_url",
-    ])
+    ]
+    writer.writerow(headers)
     for log in lead_logs:
         details: dict = {}
         if log.details:
@@ -200,22 +205,26 @@ async def export_leads_csv(
                 details = _flatten_lead_details(json.loads(log.details))
             except Exception:
                 pass
-        writer.writerow([
-            log.created_at.isoformat() if log.created_at else "",
-            log.job_id or "",
-            log.event_type,
-            log.keyword_matched or "",
-            log.message,
-            details.get("product_title", ""),
-            details.get("buyer_name", ""),
-            details.get("buyer_phone", ""),
-            details.get("buyer_email", ""),
-            details.get("buyer_location", ""),
-            details.get("buyer_address", ""),
-            details.get("message", details.get("inquiry_message", details.get("text", ""))),
-            details.get("context_snippet", ""),
-            details.get("page_url", ""),
-        ])
+        
+        # Build row dict to ensure column alignment
+        row_data = {
+            "created_at": log.created_at.isoformat() if log.created_at else "",
+            "job_id": log.job_id or "",
+            "event_type": log.event_type,
+            "keyword_matched": log.keyword_matched or "",
+            "message": log.message or "",
+            "product_title": details.get("product_title", ""),
+            "buyer_name": details.get("buyer_name", ""),
+            "buyer_phone": details.get("buyer_phone", ""),
+            "buyer_email": details.get("buyer_email", ""),
+            "buyer_location": details.get("buyer_location", ""),
+            "buyer_address": details.get("buyer_address", ""),
+            "inquiry_message": details.get("message", details.get("inquiry_message", details.get("text", ""))),
+            "context_snippet": details.get("context_snippet", ""),
+            "page_url": details.get("page_url", ""),
+        }
+        # Write in header order
+        writer.writerow([row_data.get(h, "") for h in headers])
 
     output.seek(0)
     filename = f"velora_leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"

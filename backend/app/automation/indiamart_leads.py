@@ -743,15 +743,68 @@ async def _read_detail_panel_text(page: Page) -> str:
 
 
 def _parse_name_from_panel(text: str) -> str:
-    for pat in (
-        r"(?:buyer\s*name|contact\s*person|name)\s*[:\-]\s*([A-Za-z][A-Za-z\s.]{2,60})",
+    """Extract buyer name from panel text using multiple patterns for new IndiaMART layout."""
+    # New IndiaMART patterns (2024-2025)
+    patterns = (
+        # Common label patterns
+        r"(?:buyer\s*name|contact\s*person|contact\s*name|customer\s*name)\s*[:\-]\s*([A-Za-z][A-Za-z\s.]{2,60})",
+        # Name near phone/email patterns
+        r"(?:mobile|phone)\s*[:\-]?\s*\+?\d[\d\s-]{8,}\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
+        # Name at start of inquiry section
+        r"(?:inquiry|message)\s*from\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
+        # Member/Buyer pattern
         r"(?:member\s*since|buyer)\s*[:\-]?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})",
-    ):
-        m = re.search(pat, text, re.I)
+        # Name followed by company/location
+        r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s*(?:,|from|at)\s*(?:[A-Z][a-z]+",
+    )
+    for pat in patterns:
+        m = re.search(pat, text, re.I | re.MULTILINE)
         if m:
             name = m.group(1).strip()
-            if name.lower() not in ("business use", "probable requirement"):
-                return name[:120]
+            # Filter out common false positives
+            name_lower = name.lower()
+            if name_lower not in ("business use", "probable requirement", "member since", 
+                                   "buyer name", "contact person", "not provided"):
+                # Clean up the name
+                name = re.sub(r'\s+', ' ', name).strip()
+                if len(name) >= 2:
+                    return name[:120]
+    return ""
+
+
+def _extract_product_title_from_panel(text: str) -> str:
+    """Extract full product title from detail panel text."""
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    
+    # Pattern 1: Look for "Product:" or "Product Title:" label
+    for line in lines:
+        m = re.search(r"(?:product|item|title)\s*[:\-]\s*(.+)", line, re.I)
+        if m:
+            title = m.group(1).strip()
+            if len(title) >= 5:
+                return title[:200]
+    
+    # Pattern 2: Look for "Category > Product" pattern
+    for line in lines:
+        m = re.search(r">\s*([^>]+?)(?:\s+Power\s*:|\s+Probable|\s*Price\s*:|\s*$)", line, re.I)
+        if m:
+            title = m.group(1).strip()
+            if len(title) >= 5:
+                return title[:200]
+    
+    # Pattern 3: First substantial line that's not a time marker or location
+    for line in lines[:5]:  # Check first 5 lines
+        if _TIME_RE.search(line):
+            continue
+        if _LOCATION_RE.search(line) and len(line) < 50:
+            continue
+        if len(line) >= 10 and re.search(r"[a-zA-Z]{4,}", line):
+            # Skip common UI text
+            skip_words = ["interested", "sold out", "business use", "requirement type", 
+                       "automation grade", "probable requirement", "view contact", "buy now"]
+            if not any(w in line.lower() for w in skip_words):
+                return line[:200]
+    
     return ""
 
 
@@ -786,15 +839,28 @@ async def extract_buyer_details(
 
     panel_text = await _read_detail_panel_text(page)
     _apply_panel_text_to_lead(lead, panel_text, block_text)
+    
+    # Extract better product title from panel text if available
+    if panel_text and len(panel_text) > 50:
+        # Try to find product title in panel (often in first few lines or after "Product:" label)
+        panel_title = _extract_product_title_from_panel(panel_text)
+        if panel_title and len(panel_title) > len(lead.get("product_title", "")):
+            lead["product_title"] = panel_title[:200]
 
-    for sel, field in (
-        (".buyer-name, .byr-name, .contact-name, [class*='buyer'] [class*='name']", "buyer_name"),
-        (
-            ".buyer-phone, .byr-phone, .contact-phone, [class*='phone'], .phone-no",
-            "buyer_phone",
-        ),
-        (".inqDesc, .inquiry-message, .msg-content, [class*='message']", "message"),
-    ):
+    # Updated CSS selectors for new IndiaMART layout (2024-2025)
+    # Try multiple selector patterns in order of specificity
+    selector_patterns = [
+        # Buyer name selectors - new IndiaMART uses data-testid and different class names
+        ("[data-testid='buyer-name'], [data-testid='contact-name'], .buyer-name, .byr-name, .contact-name, [class*='buyer'] h3, [class*='contact'] h3, h3[class*='name']", "buyer_name"),
+        # Buyer phone selectors - IndiaMART often uses tel: links or specific data attributes
+        ("[data-testid='buyer-phone'], [data-testid='contact-phone'], a[href^='tel:'], .buyer-phone, .byr-phone, .contact-phone, [class*='phone'], .phone-no, [class*='mobile']", "buyer_phone"),
+        # Message/inquiry selectors
+        ("[data-testid='inquiry-message'], [data-testid='buyer-message'], .inqDesc, .inquiry-message, .msg-content, [class*='message'], [class*='requirement']", "message"),
+        # Email selectors
+        ("[data-testid='buyer-email'], [data-testid='email'], a[href^='mailto:'], .buyer-email, .byr-email, .email", "buyer_email"),
+    ]
+    
+    for sel, field in selector_patterns:
         try:
             loc = page.locator(sel).first
             if await loc.count() > 0:
@@ -804,6 +870,10 @@ async def extract_buyer_details(
                         digits = re.sub(r"\D", "", val)
                         if len(digits) >= 10:
                             lead[field] = digits[-10:] if len(digits) > 10 else digits
+                    elif field == "buyer_email":
+                        # Validate email format
+                        if _EMAIL_RE.match(val):
+                            lead[field] = val
                     else:
                         lead[field] = val
         except Exception:
