@@ -118,6 +118,29 @@ _GENERIC_MATCH_WORDS = frozenset(
     }
 )
 
+_PRODUCT_LINE_RE = re.compile(
+    r"\b(?:laser|machine|machines|cleaning|cleaner|welding|welder|marking|marker|"
+    r"cutting|cutter|engraving|engraver|rust|removal|equipment|plant|system|"
+    r"compressor|motor|pump|tool|tools|industrial|metal|steel)\b",
+    re.IGNORECASE,
+)
+
+_LOW_VALUE_LEAD_LINES = frozenset(
+    {
+        ",",
+        ">",
+        "recent",
+        "buy leads",
+        "all",
+        "sold out!",
+        "i am interested",
+        "business use",
+        "probable requirement type",
+        "requirement type",
+        "category",
+    }
+)
+
 
 @dataclass
 class BuyerLeadBlock:
@@ -129,6 +152,80 @@ class BuyerLeadBlock:
 def is_buyer_inquiry_block(text: str) -> bool:
     """True when text looks like a BuyLead / recent inquiry row, not site chrome."""
     return is_seller_incoming_buy_lead(text)
+
+
+def _is_location_line(line: str) -> bool:
+    line = line.strip(" ,")
+    if not line:
+        return False
+    return bool(_LOCATION_RE.fullmatch(line) or _CITY_STATE_RE.fullmatch(line))
+
+
+def _looks_like_product_line(line: str) -> bool:
+    line = line.strip()
+    if not line or _TIME_RE.fullmatch(line):
+        return False
+    lower = line.lower().strip(" :")
+    if lower in _LOW_VALUE_LEAD_LINES or _is_location_line(line):
+        return False
+    if len(line) < 8 or not re.search(r"[a-zA-Z]{4,}", line):
+        return False
+    if _PRODUCT_LINE_RE.search(line):
+        return True
+    # Keep support for non-laser categories, but only when it is clearly not a city/state/UI line.
+    return len(line.split()) >= 2 and not any(p in lower for p in _HARD_NON_LEAD_PHRASES)
+
+
+def _is_location_time_only_block(text: str) -> bool:
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines or not any(_TIME_RE.search(ln) for ln in lines):
+        return False
+    meaningful = [
+        ln
+        for ln in lines
+        if not _TIME_RE.fullmatch(ln)
+        and ln.strip(" ,")
+        and ln.lower().strip(" :") not in _LOW_VALUE_LEAD_LINES
+    ]
+    if not meaningful:
+        return False
+    joined = ", ".join(ln.strip(" ,") for ln in meaningful)
+    if len(meaningful) <= 3 and _CITY_STATE_RE.fullmatch(joined):
+        return True
+    return all(_is_location_line(ln) for ln in meaningful)
+
+
+def _lead_candidate_score(text: str) -> int:
+    """Rank DOM snippets so full lead cards beat tiny location/time fragments."""
+    t = (text or "").strip()
+    if not t:
+        return -1000
+    lower = t.lower()
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    score = min(len(t), 1800) // 20
+    score += min(len(lines), 28)
+    if _TIME_RE.search(t):
+        score += 80
+    if _PRODUCT_LINE_RE.search(t):
+        score += 80
+    if ">" in t:
+        score += 25
+    if any(
+        p in lower
+        for p in (
+            "i am interested",
+            "requirement",
+            "sold out",
+            "business use",
+            "probable requirement",
+            "category",
+        )
+    ):
+        score += 45
+    if _is_location_time_only_block(t):
+        score -= 180
+    score -= 35 * sum(1 for p in _HARD_NON_LEAD_PHRASES if p in lower)
+    return score
 
 
 def is_seller_incoming_buy_lead(text: str) -> bool:
@@ -146,14 +243,9 @@ def is_seller_incoming_buy_lead(text: str) -> bool:
         return False
     if not has_time:
         return False
-    has_product_line = False
-    for line in t.splitlines():
-        line = line.strip()
-        if not line or _TIME_RE.fullmatch(line):
-            continue
-        if re.search(r"[a-zA-Z]{4,}", line) and len(line) > 5:
-            has_product_line = True
-            break
+    if _is_location_time_only_block(t):
+        return False
+    has_product_line = any(_looks_like_product_line(line) for line in t.splitlines())
     has_interest = (
         "interested" in lower
         or "requirement" in lower
@@ -397,13 +489,46 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
       const timeRe = /(?:\\bjust\\s+now\\b|\\b\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago\\b)/i;
       const out = [];
       const seen = new Set();
+      const clean = (text) => (text || '').trim().replace(/\\n{3,}/g, '\\n');
       const push = (text, selector, rowIndex) => {
-        const t = (text || '').trim().replace(/\\n{3,}/g, '\\n');
+        const t = clean(text);
         if (t.length < 25 || t.length > 2500) return;
-        const key = t.slice(0, 140);
+        const key = t.replace(/\\s+/g, ' ').slice(0, 650);
         if (seen.has(key)) return;
         seen.add(key);
         out.push({ text: t, row_index: rowIndex, selector: selector || 'heuristic' });
+      };
+      const textOf = (el) => clean(el && (el.innerText || el.textContent || ''));
+      const pushElementContext = (el, selector, rowIndex) => {
+        if (!el) return;
+        const base = textOf(el);
+        if (!timeRe.test(base)) return;
+        push(base, selector, rowIndex);
+
+        let cur = el;
+        for (let depth = 0; depth < 6 && cur && cur !== document.body; depth += 1) {
+          cur = cur.parentElement;
+          const txt = textOf(cur);
+          if (timeRe.test(txt)) push(txt, `${selector || 'time'}:parent-${depth + 1}`, rowIndex);
+        }
+
+        const card = el.closest('li, article, section, tr, a, div[class*="lead"], div[class*="inq"], div[class*="bltxn"], div');
+        const cardTxt = textOf(card);
+        if (timeRe.test(cardTxt)) push(cardTxt, `${selector || 'time'}:closest-card`, rowIndex);
+
+        const parent = el.parentElement;
+        if (!parent) return;
+        const siblings = Array.from(parent.children || []);
+        const idx = siblings.indexOf(el);
+        if (idx < 0) return;
+        for (const radius of [1, 2, 3]) {
+          const slice = siblings
+            .slice(Math.max(0, idx - radius), Math.min(siblings.length, idx + radius + 1))
+            .map(textOf)
+            .filter(Boolean)
+            .join('\\n');
+          if (timeRe.test(slice)) push(slice, `${selector || 'time'}:sibling-window-${radius}`, rowIndex);
+        }
       };
       const roots = [
         '#leadList', '.byr-inqry-list', '.bltxn-list', '[class*="bltxn"]',
@@ -419,19 +544,17 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
         for (const sel of selectors) {
           const nodes = scope.querySelectorAll(sel);
           nodes.forEach((el, idx) => {
-            const raw = (el.innerText || el.textContent || '').trim();
-            if (!timeRe.test(raw)) return;
-            push(raw, sel, idx);
+            pushElementContext(el, sel, idx);
           });
         }
       }
       const cardSel = 'div, li, article, section, a, [class*="lead"], [class*="inqry"], [class*="bltxn"]';
       document.querySelectorAll(cardSel).forEach((el, idx) => {
-        const raw = (el.innerText || '').trim();
+        const raw = textOf(el);
         if (!timeRe.test(raw)) return;
         const lines = raw.split('\\n').map(l => l.trim()).filter(Boolean);
-        if (lines.length < 2 || lines.length > 16) return;
-        if (raw.length < 30 || raw.length > 1400) return;
+        if (lines.length < 2 || lines.length > 32) return;
+        if (raw.length < 30 || raw.length > 2200) return;
         push(raw, 'card-heuristic', idx);
       });
       return out;
@@ -443,11 +566,21 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
     except Exception:
         raw = []
 
+    sorted_raw = sorted(
+        raw or [],
+        key=lambda item: _lead_candidate_score(item.get("text") or ""),
+        reverse=True,
+    )
     blocks: list[BuyerLeadBlock] = []
-    for item in raw or []:
+    seen_texts: list[str] = []
+    for item in sorted_raw:
         text = (item.get("text") or "").strip()
         if not is_seller_incoming_buy_lead(text):
             continue
+        compact = re.sub(r"\s+", " ", text).strip().lower()
+        if any(compact == prev or compact in prev for prev in seen_texts):
+            continue
+        seen_texts.append(compact)
         blocks.append(
             BuyerLeadBlock(
                 text=text,
@@ -471,7 +604,9 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
 def _lead_title_for_click(block_text: str) -> str:
     one = " ".join(block_text.split())
     cat = re.search(
-        r">\s*([^>]+?)(?:\s+(?:working\s+area|laser\s+power|power|probable|price|quantity)\s*:|\s*$)",
+        r">\s*([^>]+?)(?:\s+(?:working\s+area|laser\s+power|power|"
+        r"probable(?:\s+requirement\s+type)?|price|quantity)\s*:"
+        r"|\s+probable\s+requirement\s+type\b|\s*$)",
         one,
         re.I,
     )
@@ -525,7 +660,11 @@ def _lead_title_for_click(block_text: str) -> str:
                 head = head[: loc.start()].strip(" ,-|")
             if len(head) >= 8 and re.search(r"[a-zA-Z]{3,}", head):
                 return head[:120]
-    cat = re.search(r">\s*([^>]+?)(?:\s+Power\s*:|\s+Probable|\s*$)", one, re.I)
+    cat = re.search(
+        r">\s*([^>]+?)(?:\s+Power\s*:|\s+Probable(?:\s+Requirement\s+Type)?\b|\s*$)",
+        one,
+        re.I,
+    )
     if cat and len(cat.group(1).strip()) >= 8:
         return cat.group(1).strip()[:120]
     return ""

@@ -187,3 +187,28 @@ def test_location_first_row_extracts_product_not_state():
     )
     assert _lead_title_for_click(block) == "Non Metal Laser Cutting Machine"
     assert _parse_address_from_text(block) == "Kolkata, West Bengal"
+
+
+def test_rejects_location_time_only_fragment_from_recent_feed():
+    block = "Ghaziabad\n,\nUttar Pradesh\n44 mins ago"
+    assert not is_buyer_inquiry_block(block)
+    assert _lead_title_for_click(block) == ""
+
+
+def test_accepts_location_first_full_recent_card():
+    block = (
+        "Ghaziabad\n"
+        ",\n"
+        "Uttar Pradesh\n"
+        "44 mins ago\n"
+        "Laser Rust Cleaning Machine\n"
+        ">\n"
+        "Laser Rust Removal Machine\n"
+        "Probable Requirement Type\n"
+        ":\n"
+        "Business Use\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(block)
+    assert _lead_title_for_click(block) == "Laser Rust Removal Machine"
+    assert _parse_address_from_text(block) == "Ghaziabad, Uttar Pradesh"
