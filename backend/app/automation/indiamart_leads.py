@@ -506,38 +506,76 @@ _CONTACT_REVEAL_LABELS = (
 async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     """Click any detail-panel control that likely reveals buyer phone/name."""
     clicked_any = False
-    for label in _INTEREST_BUTTON_LABELS:
-        for role in ("button", "link"):
-            try:
-                loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
-                n = await loc.count()
-                for i in range(min(n, 2)):
-                    try:
-                        el = loc.nth(i)
-                        await el.scroll_into_view_if_needed(timeout=3000)
-                        await el.click(timeout=5000)
-                        await page.wait_for_timeout(2200)
-                        clicked_any = True
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-    for label in _CONTACT_REVEAL_LABELS:
-        for role in ("button", "link"):
-            try:
-                loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
-                n = await loc.count()
-                for i in range(min(n, 2)):
-                    try:
-                        el = loc.nth(i)
-                        await el.scroll_into_view_if_needed(timeout=3000)
-                        await el.click(timeout=4000)
-                        await page.wait_for_timeout(1800)
-                        clicked_any = True
-                    except Exception:
-                        continue
-            except Exception:
-                pass
+    
+    # Strategy 1: Try new IndiaMART layout selectors (data-testid and CSS classes)
+    contact_selectors = [
+        "[data-testid='view-contact-btn']",
+        "[data-testid='contact-button']",
+        "[data-testid='view-number']",
+        "[data-testid='show-mobile']",
+        "[data-testid='reveal-contact']",
+        "button[class*='contact']",
+        "button[class*='view-number']",
+        "button[class*='show-mobile']",
+        "a[class*='contact']",
+        "span[class*='contact']",
+        "div[class*='contact-btn']",
+        ".view-contact-btn",
+        ".contact-reveal-btn",
+        ".show-number-btn",
+        ".view-mobile-btn",
+    ]
+    
+    for sel in contact_selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                await loc.scroll_into_view_if_needed(timeout=2000)
+                await loc.click(timeout=4000)
+                await page.wait_for_timeout(2500)
+                clicked_any = True
+                logger.info("Clicked contact reveal button via selector", selector=sel)
+                break
+        except Exception:
+            continue
+    
+    if not clicked_any:
+        # Strategy 2: Try text-based labels (legacy approach)
+        for label in _INTEREST_BUTTON_LABELS:
+            for role in ("button", "link"):
+                try:
+                    loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
+                    n = await loc.count()
+                    for i in range(min(n, 2)):
+                        try:
+                            el = loc.nth(i)
+                            await el.scroll_into_view_if_needed(timeout=3000)
+                            await el.click(timeout=5000)
+                            await page.wait_for_timeout(2200)
+                            clicked_any = True
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                    
+    if not clicked_any:
+        # Strategy 3: Try contact reveal labels
+        for label in _CONTACT_REVEAL_LABELS:
+            for role in ("button", "link"):
+                try:
+                    loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
+                    n = await loc.count()
+                    for i in range(min(n, 2)):
+                        try:
+                            el = loc.nth(i)
+                            await el.scroll_into_view_if_needed(timeout=3000)
+                            await el.click(timeout=4000)
+                            await page.wait_for_timeout(1800)
+                            clicked_any = True
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
     try:
         broad = page.locator("button, a, [role='button']").filter(
             has_text=re.compile(
@@ -626,21 +664,57 @@ async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
         data = await page.evaluate(
-            """() => {
+            r"""() => {
               const phones = [];
               const addPhone = (raw) => {
-                const d = (raw || '').replace(/\\D/g, '');
+                const d = (raw || '').replace(/\D/g, '');
                 if (d.length >= 10) phones.push(d.slice(-10));
               };
+              
+              // Try new IndiaMART selectors
+              document.querySelectorAll('[data-testid="buyer-phone"], [data-testid="contact-phone"], .buyer-phone, .contact-phone').forEach(el => {
+                addPhone(el.textContent || el.innerText);
+              });
+              
+              // Try tel: links
               document.querySelectorAll('a[href^="tel:"]').forEach(a => addPhone(a.href));
+              
+              // Try inputs
               document.querySelectorAll('input, textarea').forEach(inp => {
                 const v = (inp.value || '').trim();
-                if (/^\\+?\\d[\\d\\s-]{8,}$/.test(v)) addPhone(v);
+                if (/^\+?\d[\d\s-]{8,}$/.test(v)) addPhone(v);
               });
+              
+              // Look for phone patterns in visible text
               const body = document.body.innerText || '';
-              const nameRe = /(?:buyer\\s*name|contact\\s*person|name)\\s*[:\\-]\\s*([A-Za-z][A-Za-z\\s.]{2,60})/i;
-              const nm = body.match(nameRe);
-              return { phones: [...new Set(phones)], name: nm ? nm[1].trim() : '' };
+              const phoneRe = /(?:Mobile|Phone|Contact|Tel)[\s:]*([\+\d\s\-()]{10,})/gi;
+              let match;
+              while ((match = phoneRe.exec(body)) !== null) {
+                addPhone(match[1]);
+              }
+              
+              // Try to find name from various patterns
+              let name = '';
+              const nameSelectors = [
+                '[data-testid="buyer-name"]', '[data-testid="contact-name"]',
+                '.buyer-name', '.contact-name', '.buyer-details h3', '.contact-details h3'
+              ];
+              for (const sel of nameSelectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                  name = (el.textContent || el.innerText).trim();
+                  if (name && name.length > 2 && name.length < 60) break;
+                }
+              }
+              
+              // Regex fallback for name
+              if (!name) {
+                const nameRe = /(?:buyer\s*name|contact\s*person|contact\s*name|customer\s*name)\s*[:\-]\s*([A-Za-z][A-Za-z\s.]{2,60})/i;
+                const nm = body.match(nameRe);
+                if (nm) name = nm[1].trim();
+              }
+              
+              return { phones: [...new Set(phones)], name: name };
             }"""
         )
         if data.get("phones"):
@@ -897,18 +971,24 @@ async def extract_buyer_details(
                     lead["buyer_phone"] = dom_contact["buyer_phone"]
                 if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
                     lead["buyer_name"] = dom_contact["buyer_name"]
-                for sel, field in (
-                    (".buyer-name, .byr-name, .contact-name", "buyer_name"),
-                    (".buyer-phone, .byr-phone, .contact-phone, .phone-no", "buyer_phone"),
-                ):
+                # Try new IndiaMART selectors after contact reveal
+                post_reveal_selectors = [
+                    ("[data-testid='buyer-name'], [data-testid='contact-name'], .buyer-name, .byr-name, .contact-name, [class*='buyer'] h3, [class*='contact'] h3", "buyer_name"),
+                    ("[data-testid='buyer-phone'], [data-testid='contact-phone'], a[href^='tel:'], .buyer-phone, .byr-phone, .contact-phone, [class*='phone'], .phone-no, [class*='mobile']", "buyer_phone"),
+                    ("[data-testid='buyer-email'], [data-testid='email'], a[href^='mailto:'], .buyer-email, .byr-email, .email", "buyer_email"),
+                ]
+                for sel, field in post_reveal_selectors:
                     try:
                         loc = page.locator(sel).first
                         if await loc.count() > 0:
-                            val = (await loc.inner_text(timeout=2000)).strip()
+                            val = (await loc.inner_text(timeout=3000)).strip()
                             if field == "buyer_phone":
                                 digits = re.sub(r"\D", "", val)
                                 if len(digits) >= 10:
                                     lead[field] = digits[-10:] if len(digits) > 10 else digits
+                            elif field == "buyer_email":
+                                if _EMAIL_RE.match(val):
+                                    lead[field] = val
                             elif val and len(val) < 120:
                                 lead[field] = val
                     except Exception:
