@@ -26,6 +26,7 @@ from tempfile import TemporaryDirectory
 
 META_FILENAME = ".velora_session_meta.json"
 COOKIES_FILENAME = ".velora_cookies.json"
+STORAGE_STATE_FILENAME = ".velora_storage_state.json"
 
 # Chrome cache — huge, not needed for login; causes "Permission denied" on server
 _SKIP_DIR_PARTS = frozenset(
@@ -272,6 +273,7 @@ def _upload_via_docker_cp(
 
 def upload_portable_cookies_only(
     cookies_path: Path,
+    storage_state_path: Path | None,
     server_ip: str,
     ssh_user: str,
     ssh_pass: str,
@@ -279,7 +281,7 @@ def upload_portable_cookies_only(
     session_meta: dict | None = None,
     compose_dir: str | None = None,
 ) -> tuple[bool, str]:
-    """Push .velora_cookies.json only — no full profile re-upload, no re-login."""
+    """Push portable cookies/storage only — no full profile re-upload, no re-login."""
     try:
         import paramiko
     except ImportError:
@@ -303,6 +305,10 @@ def upload_portable_cookies_only(
         remote_cookies = f"{host_profile_dir}/{COOKIES_FILENAME}"
         sftp = ssh.open_sftp()
         sftp.put(str(cookies_path), remote_cookies)
+        remote_storage = ""
+        if storage_state_path and storage_state_path.is_file():
+            remote_storage = f"{host_profile_dir}/{STORAGE_STATE_FILENAME}"
+            sftp.put(str(storage_state_path), remote_storage)
         sftp.close()
 
         if session_meta:
@@ -311,12 +317,23 @@ def upload_portable_cookies_only(
         container = _detect_backend_container(ssh)
         if container:
             inner = f"/data/browser_profiles/{profile_name}/{COOKIES_FILENAME}"
-            host_tmp = f"/tmp/{profile_name}_{COOKIES_FILENAME}"
             for docker_bin in ("docker", "sudo docker"):
                 _ssh_exec(ssh, f"{docker_bin} cp {remote_cookies} {container}:{inner} 2>/dev/null")
+                if remote_storage:
+                    inner_storage = (
+                        f"/data/browser_profiles/{profile_name}/"
+                        f"{STORAGE_STATE_FILENAME}"
+                    )
+                    _ssh_exec(
+                        ssh,
+                        f"{docker_bin} cp {remote_storage} {container}:{inner_storage} "
+                        "2>/dev/null",
+                    )
 
         ssh.close()
         print(f"  Synced portable cookies → {remote_cookies}")
+        if remote_storage:
+            print(f"  Synced browser storage → {remote_storage}")
         print("  (Your earlier login is kept — this file makes Linux server use it.)")
         return True, host_profile_dir
     except Exception as e:
@@ -487,12 +504,21 @@ async def run_sync_cookies_only(
             )
             await browser.close()
             sys.exit(1)
+        if not has_feed:
+            print(
+                "  ERROR: Recent Buy Leads rows are not visible on this PC. "
+                "Open/login again until rows with 'mins ago' / 'hrs ago' appear."
+            )
+            await browser.close()
+            sys.exit(1)
         cookies = await browser.cookies()
         (profile_dir / COOKIES_FILENAME).write_text(
             json.dumps(cookies, ensure_ascii=False),
             encoding="utf-8",
         )
+        await browser.storage_state(path=str(profile_dir / STORAGE_STATE_FILENAME))
         print(f"  Exported {len(cookies)} cookies from saved session.")
+        print("  Exported browser storage state from saved session.")
         await browser.close()
 
     if not ssh_pass:
@@ -509,6 +535,7 @@ async def run_sync_cookies_only(
 
     ok, _ = upload_portable_cookies_only(
         profile_dir / COOKIES_FILENAME,
+        profile_dir / STORAGE_STATE_FILENAME,
         server_ip,
         ssh_user,
         ssh_pass,
@@ -613,7 +640,7 @@ async def run_local_login(
         login_ok = (
             not any(p in final_lower for p in ("login", "signin", "sign-in"))
             and not on_marketing
-            and (has_leads_feed or "lead manager" in body_lower or "bltxn" in final_lower)
+            and has_leads_feed
         )
         if on_marketing:
             print(
@@ -621,7 +648,10 @@ async def run_local_login(
                 "see buyer rows, then press ENTER."
             )
         elif not login_ok:
-            print("\n  WARNING: Login not verified. Finish login on Recent Buy Leads.")
+            print(
+                "\n  WARNING: Buyer rows were not visible. Open Recent Buy Leads until "
+                "you can see rows with 'mins ago' / 'hrs ago', then upload again."
+            )
         else:
             print(f"\n  Login verified (leads feed visible). Page: {final_url}")
 
@@ -641,10 +671,12 @@ async def run_local_login(
                 json.dumps(cookies, ensure_ascii=False),
                 encoding="utf-8",
             )
+            await browser.storage_state(path=str(profile_dir / STORAGE_STATE_FILENAME))
             print(
                 f"  Exported {len(cookies)} portable cookies "
                 f"(for Linux server — required after upload)"
             )
+            print("  Exported portable browser storage (localStorage).")
         except Exception as exc:
             print(f"  WARNING: Could not export portable cookies: {exc}")
 

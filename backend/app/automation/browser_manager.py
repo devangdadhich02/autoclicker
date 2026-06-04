@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import uuid
 from datetime import UTC, datetime
@@ -15,7 +16,10 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from app.automation.profile_cookies import load_portable_cookies
+from app.automation.profile_cookies import (
+    load_portable_cookies,
+    load_portable_storage_state,
+)
 from app.core.config import settings
 from app.core.exceptions import BrowserError
 from app.core.logging import get_logger
@@ -99,6 +103,7 @@ class BrowserManager:
             raise BrowserError(f"Failed to launch browser: {exc}") from exc
 
         await self._apply_stealth(self._context)
+        await self._inject_portable_storage_state()
         await self._inject_portable_cookies()
 
         pages = self._context.pages
@@ -130,6 +135,41 @@ class BrowserManager:
         except Exception as exc:
             logger.warning(
                 "Portable cookie load failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+
+    async def _inject_portable_storage_state(self) -> None:
+        """Restore localStorage exported from login.ps1 into Linux Chromium."""
+        state = load_portable_storage_state(self.profile_path)
+        origins = state.get("origins") if isinstance(state, dict) else None
+        if not origins or self._context is None:
+            return
+        try:
+            await self._context.add_init_script(
+                f"""
+                (() => {{
+                  const state = {json.dumps({"origins": origins}, ensure_ascii=False)};
+                  const originState = (state.origins || []).find(
+                    item => item.origin === location.origin
+                  );
+                  if (!originState || !Array.isArray(originState.localStorage)) return;
+                  for (const item of originState.localStorage) {{
+                    if (!item || typeof item.name !== 'string') continue;
+                    try {{ localStorage.setItem(item.name, item.value || ''); }} catch (e) {{}}
+                  }}
+                }})();
+                """
+            )
+            logger.info(
+                "Portable browser storage state loaded",
+                job_id=self.job_id,
+                profile=self.profile_name,
+                origins=len(origins),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Portable storage state load failed",
                 job_id=self.job_id,
                 error=str(exc),
             )
