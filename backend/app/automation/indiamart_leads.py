@@ -179,10 +179,25 @@ def is_weak_match_context(snippet: str, keyword: str) -> bool:
 
 
 def _parse_address_from_text(text: str) -> str:
-    for line in text.splitlines():
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        if line == "," and 0 < idx < len(lines) - 1:
+            city = lines[idx - 1].strip(" ,")
+            state = lines[idx + 1].strip(" ,")
+            joined = f"{city}, {state}"
+            if (
+                _CITY_STATE_RE.fullmatch(joined)
+                or (_LOCATION_RE.search(city) and _LOCATION_RE.search(state))
+            ):
+                return joined[:300]
+    for idx, line in enumerate(lines):
         line = line.strip()
         if not line or _TIME_RE.search(line):
             continue
+        if idx + 1 < len(lines):
+            joined = f"{line.strip(' ,')}, {lines[idx + 1].strip(' ,')}"
+            if _CITY_STATE_RE.fullmatch(joined):
+                return joined[:300]
         if _LOCATION_RE.search(line) or ("," in line and len(line) < 120):
             return line[:300]
     loc = _LOCATION_RE.search(text)
@@ -454,17 +469,51 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
 
 
 def _lead_title_for_click(block_text: str) -> str:
-    for line in block_text.splitlines():
-        line = line.strip()
-        if not line or _TIME_RE.search(line):
-            continue
-        lower = line.lower()
-        if lower in ("sold out!", "i am interested", "business use"):
-            continue
-        if len(line) >= 8 and re.search(r"[a-zA-Z]{3,}", line):
-            return line[:120]
-    # Feed preview is often one line: "Product City, State 2 hrs ago Category > ..."
     one = " ".join(block_text.split())
+    cat = re.search(
+        r">\s*([^>]+?)(?:\s+(?:working\s+area|laser\s+power|power|probable|price|quantity)\s*:|\s*$)",
+        one,
+        re.I,
+    )
+    if cat and len(cat.group(1).strip()) >= 8:
+        return cat.group(1).strip(" ,-|")[:120]
+
+    lines = [line.strip() for line in block_text.splitlines() if line.strip()]
+    after_time = False
+    productish_after_time: list[str] = []
+    productish_anywhere: list[str] = []
+    for line in lines:
+        if _TIME_RE.search(line):
+            after_time = True
+            continue
+        lower = line.lower().strip(" :")
+        if (
+            lower in ("sold out!", "i am interested", "business use", "probable requirement type")
+            or line in (",", ">")
+            or _LOCATION_RE.fullmatch(line)
+            or _CITY_STATE_RE.fullmatch(line)
+        ):
+            continue
+        if len(line) < 8 or not re.search(r"[a-zA-Z]{3,}", line):
+            continue
+        looks_product = bool(
+            re.search(
+                r"\b(?:laser|machine|cleaning|welding|marking|cutting|engraving|rust|removal|cleaner|equipment)\b",
+                line,
+                re.I,
+            )
+        )
+        if looks_product:
+            productish_anywhere.append(line)
+            if after_time:
+                productish_after_time.append(line)
+
+    if productish_after_time:
+        return productish_after_time[-1][:120]
+    if productish_anywhere:
+        return productish_anywhere[0][:120]
+
+    # Feed preview is often one line: "Product City, State 2 hrs ago Category > ..."
     if not one or len(one) < 20:
         return ""
     m = _TIME_RE.search(one)
@@ -509,14 +558,14 @@ _CONTACT_REVEAL_LABELS = (
 async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     """Click any detail-panel control that likely reveals buyer phone/name."""
     clicked_any = False
-    
+
     # Debug: Log page state
     try:
         page_html = await page.content()
         logger.info("Contact reveal attempt starting", page_length=len(page_html))
     except Exception:
         pass
-    
+
     # Strategy 1: Try new IndiaMART layout selectors (data-testid and CSS classes)
     contact_selectors = [
         "[data-testid='view-contact-btn']",
@@ -545,7 +594,7 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
         "[class*='show-contact']",
         "[class*='contact-details'] button",
     ]
-    
+
     for sel in contact_selectors:
         try:
             loc = page.locator(sel).first
@@ -568,10 +617,10 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
         except Exception as e:
             logger.debug("Selector failed", selector=sel, error=str(e)[:100])
             continue
-    
+
     if not clicked_any:
         logger.warning("No contact reveal button found with CSS selectors, trying text-based")
-    
+
     if not clicked_any:
         # Strategy 2: Try text-based labels (legacy approach)
         for label in _INTEREST_BUTTON_LABELS:
@@ -590,7 +639,7 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
                             continue
                 except Exception:
                     pass
-                    
+
     if not clicked_any:
         # Strategy 3: Try contact reveal labels
         for label in _CONTACT_REVEAL_LABELS:
@@ -703,21 +752,39 @@ async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
                 const d = (raw || '').replace(/\D/g, '');
                 if (d.length >= 10) phones.push(d.slice(-10));
               };
-              
+              const textOf = (el) => [
+                el.textContent || '',
+                el.getAttribute('href') || '',
+                el.getAttribute('title') || '',
+                el.getAttribute('aria-label') || '',
+                el.getAttribute('data-phone') || '',
+                el.getAttribute('data-mobile') || '',
+                el.getAttribute('data-contact') || '',
+                el.getAttribute('value') || '',
+              ].join(' ');
               // Try new IndiaMART selectors
-              document.querySelectorAll('[data-testid="buyer-phone"], [data-testid="contact-phone"], .buyer-phone, .contact-phone').forEach(el => {
-                addPhone(el.textContent || el.innerText);
+              const phoneSelectors = [
+                '[data-testid="buyer-phone"]',
+                '[data-testid="contact-phone"]',
+                '.buyer-phone',
+                '.contact-phone',
+                '[class*="phone"]',
+                '[class*="mobile"]',
+                '[class*="contact"]',
+              ].join(',');
+              document.querySelectorAll(phoneSelectors).forEach(el => {
+                addPhone(textOf(el));
               });
-              
+
               // Try tel: links
               document.querySelectorAll('a[href^="tel:"]').forEach(a => addPhone(a.href));
-              
+
               // Try inputs
               document.querySelectorAll('input, textarea').forEach(inp => {
                 const v = (inp.value || '').trim();
                 if (/^\+?\d[\d\s-]{8,}$/.test(v)) addPhone(v);
               });
-              
+
               // Look for phone patterns in visible text
               const body = document.body.innerText || '';
               const phoneRe = /(?:Mobile|Phone|Contact|Tel)[\s:]*([\+\d\s\-()]{10,})/gi;
@@ -725,12 +792,18 @@ async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
               while ((match = phoneRe.exec(body)) !== null) {
                 addPhone(match[1]);
               }
-              
+              const anyPhoneRe = /(?:\+91[\s-]?)?[6-9]\d{9}/g;
+              while ((match = anyPhoneRe.exec(body)) !== null) {
+                addPhone(match[0]);
+              }
+
               // Try to find name from various patterns
               let name = '';
               const nameSelectors = [
                 '[data-testid="buyer-name"]', '[data-testid="contact-name"]',
-                '.buyer-name', '.contact-name', '.buyer-details h3', '.contact-details h3'
+                '.buyer-name', '.contact-name', '.buyer-details h3', '.contact-details h3',
+                '[class*="buyer"] h2', '[class*="buyer"] h3',
+                '[class*="contact"] h2', '[class*="contact"] h3'
               ];
               for (const sel of nameSelectors) {
                 const el = document.querySelector(sel);
@@ -739,14 +812,14 @@ async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
                   if (name && name.length > 2 && name.length < 60) break;
                 }
               }
-              
+
               // Regex fallback for name
               if (!name) {
                 const nameRe = /(?:buyer\s*name|contact\s*person|contact\s*name|customer\s*name)\s*[:\-]\s*([A-Za-z][A-Za-z\s.]{2,60})/i;
                 const nm = body.match(nameRe);
                 if (nm) name = nm[1].trim();
               }
-              
+
               return { phones: [...new Set(phones)], name: name };
             }"""
         )
@@ -870,7 +943,7 @@ def _parse_name_from_panel(text: str) -> str:
             name = m.group(1).strip()
             # Filter out common false positives
             name_lower = name.lower()
-            if name_lower not in ("business use", "probable requirement", "member since", 
+            if name_lower not in ("business use", "probable requirement", "member since",
                                    "buyer name", "contact person", "not provided"):
                 # Clean up the name
                 name = re.sub(r'\s+', ' ', name).strip()
@@ -882,7 +955,7 @@ def _parse_name_from_panel(text: str) -> str:
 def _extract_product_title_from_panel(text: str) -> str:
     """Extract full product title from detail panel text."""
     lines = [l.strip() for l in text.split('\n') if l.strip()]
-    
+
     # Pattern 1: Look for "Product:" or "Product Title:" label
     for line in lines:
         m = re.search(r"(?:product|item|title)\s*[:\-]\s*(.+)", line, re.I)
@@ -890,7 +963,7 @@ def _extract_product_title_from_panel(text: str) -> str:
             title = m.group(1).strip()
             if len(title) >= 5:
                 return title[:200]
-    
+
     # Pattern 2: Look for "Category > Product" pattern
     for line in lines:
         m = re.search(r">\s*([^>]+?)(?:\s+Power\s*:|\s+Probable|\s*Price\s*:|\s*$)", line, re.I)
@@ -898,7 +971,7 @@ def _extract_product_title_from_panel(text: str) -> str:
             title = m.group(1).strip()
             if len(title) >= 5:
                 return title[:200]
-    
+
     # Pattern 3: First substantial line that's not a time marker or location
     for line in lines[:5]:  # Check first 5 lines
         if _TIME_RE.search(line):
@@ -907,11 +980,11 @@ def _extract_product_title_from_panel(text: str) -> str:
             continue
         if len(line) >= 10 and re.search(r"[a-zA-Z]{4,}", line):
             # Skip common UI text
-            skip_words = ["interested", "sold out", "business use", "requirement type", 
+            skip_words = ["interested", "sold out", "business use", "requirement type",
                        "automation grade", "probable requirement", "view contact", "buy now"]
             if not any(w in line.lower() for w in skip_words):
                 return line[:200]
-    
+
     return ""
 
 
@@ -946,7 +1019,7 @@ async def extract_buyer_details(
 
     panel_text = await _read_detail_panel_text(page)
     _apply_panel_text_to_lead(lead, panel_text, block_text)
-    
+
     # Extract better product title from panel text if available
     if panel_text and len(panel_text) > 50:
         # Try to find product title in panel (often in first few lines or after "Product:" label)
@@ -966,7 +1039,7 @@ async def extract_buyer_details(
         # Email selectors
         ("[data-testid='buyer-email'], [data-testid='email'], a[href^='mailto:'], .buyer-email, .byr-email, .email", "buyer_email"),
     ]
-    
+
     for sel, field in selector_patterns:
         try:
             loc = page.locator(sel).first

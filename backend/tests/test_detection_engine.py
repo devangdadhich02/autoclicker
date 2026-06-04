@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import types
 
-import pytest
-
 from app.automation.detection_engine import DetectionEngine
 from app.models.keyword import MatchType
 
@@ -60,6 +58,26 @@ def test_exact_match():
     kw = make_keyword("kw2", "pipe", match_type=MatchType.exact)
     results = engine.evaluate("steel pipe 50mm", [kw])
     assert len(results) == 1
+
+
+def test_exact_product_keyword_tolerates_plural_feed_title():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword(
+        "kw-product-exact", "Laser welding machine", match_type=MatchType.exact
+    )
+    text = "Laser Welding Machines\n4 mins ago\nKheda, Gujarat\nSold Out!"
+    results = engine.evaluate(text, [kw])
+    assert len(results) == 1
+
+
+def test_exact_product_keyword_does_not_match_different_laser_machine():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword(
+        "kw-product-exact-2", "Laser welding machine", match_type=MatchType.exact
+    )
+    text = "Non Metal Laser Cutting Machine\n19 mins ago\nKolkata, West Bengal"
+    results = engine.evaluate(text, [kw])
+    assert results == []
 
 
 def test_regex_match():

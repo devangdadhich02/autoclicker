@@ -31,6 +31,9 @@ _CSV_HEADERS = [
     "inquiry_message",
     "context_snippet",
     "page_url",
+    "lead_fingerprint",
+    "contact_revealed",
+    "next_contact_retry_at",
 ]
 
 
@@ -57,8 +60,15 @@ def load_seen_lead_fingerprints(job_id: str, job_name: str) -> set[str]:
                     seen.add(f"em:{email}")
                     continue
                 snippet = row.get("context_snippet") or row.get("inquiry_message") or ""
-                if snippet:
-                    seen.add(lead_fingerprint(snippet, {}))
+                fp = row.get("lead_fingerprint") or (
+                    lead_fingerprint(snippet, {}) if snippet else ""
+                )
+                contact_revealed = (row.get("contact_revealed") or "").strip().lower()
+                if fp and contact_revealed != "true":
+                    seen.add(fp if fp.startswith("partial:") else f"partial:{fp}")
+                    continue
+                if fp:
+                    seen.add(fp.removeprefix("partial:"))
     except Exception as exc:
         logger.warning("Could not load lead fingerprints", path=str(path), error=str(exc))
     return seen
@@ -89,9 +99,15 @@ def append_lead_row(
         "buyer_email": details.get("buyer_email", ""),
         "buyer_location": details.get("buyer_location", ""),
         "buyer_address": details.get("buyer_address", details.get("buyer_location", "")),
-        "inquiry_message": details.get("message", details.get("inquiry_message", details.get("text", message))),
+        "inquiry_message": details.get(
+            "message",
+            details.get("inquiry_message", details.get("text", message)),
+        ),
         "context_snippet": context_snippet or details.get("context_snippet", ""),
         "page_url": page_url or "",
+        "lead_fingerprint": details.get("lead_fingerprint", ""),
+        "contact_revealed": details.get("contact_revealed", ""),
+        "next_contact_retry_at": details.get("next_contact_retry_at", ""),
     }
 
     path = _job_csv_path(job_id, job_name)

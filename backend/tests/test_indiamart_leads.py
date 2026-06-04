@@ -1,5 +1,7 @@
 from app.automation.indiamart_leads import (
     _blocks_from_body_text,
+    _lead_title_for_click,
+    _parse_address_from_text,
     is_buyer_inquiry_block,
     is_plausible_buyer_phone,
     is_weak_match_context,
@@ -162,3 +164,26 @@ def test_header_sign_in_not_logged_out_when_seller_ui_present():
     assert not is_indiamart_logged_out_body(
         "Laser Welding Machine\n4 mins ago\nKheda, Gujarat\nSold Out!"
     )
+
+
+def test_location_first_row_extracts_product_not_state():
+    block = (
+        "Kolkata\n"
+        ",\n"
+        "West Bengal\n"
+        "19 mins ago\n"
+        "Laser Cutting Machines\n"
+        ">\n"
+        "Non Metal Laser Cutting Machine\n"
+        "Working Area\n"
+        ":\n"
+        "A4 size\n"
+        "Laser Power\n"
+        ":\n"
+        "50 W\n"
+        "Probable Requirement Type\n"
+        ":\n"
+        "Business Use"
+    )
+    assert _lead_title_for_click(block) == "Non Metal Laser Cutting Machine"
+    assert _parse_address_from_text(block) == "Kolkata, West Bengal"

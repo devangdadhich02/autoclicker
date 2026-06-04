@@ -44,14 +44,29 @@ _SEMANTIC_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
     "engraving": ("engraving", "marking", "hallmarking", "etching", "engrave"),
     "hallmarking": ("hallmarking", "marking", "engraving"),
 }
+_SEMANTIC_VARIANT_TO_CANONICAL: dict[str, str] = {}
+for _canonical, _variants in _SEMANTIC_TOKEN_ALIASES.items():
+    for _variant in _variants:
+        _SEMANTIC_VARIANT_TO_CANONICAL.setdefault(_variant, _canonical)
 
 
 def _normalize_semantic_tokens(text: str) -> str:
     out = text.lower()
-    for canonical, variants in _SEMANTIC_TOKEN_ALIASES.items():
-        for variant in variants:
-            out = re.sub(rf"\b{re.escape(variant)}\b", canonical, out)
+    for variant, canonical in _SEMANTIC_VARIANT_TO_CANONICAL.items():
+        if variant == canonical:
+            continue
+        out = re.sub(rf"\b{re.escape(variant)}\b", canonical, out)
+    # IndiaMART product titles drift between singular/plural forms.
+    out = re.sub(
+        r"\b(machines|equipments|systems|cleaners|cutters|welders|markers)\b",
+        lambda m: m.group(1)[:-1],
+        out,
+    )
     return out
+
+
+def _significant_words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 3]
 
 
 @dataclass
@@ -131,7 +146,7 @@ class DetectionEngine:
         self, term: str, text: str, case_sensitive: bool
     ) -> re.Match[str] | None:
         """Fallback when exact substring fails (spacing/casing/product title variants).
-        
+
         CRITICAL: Only match if ALL significant words from term are present in text.
         Prevents partial matches like "laser marking" matching "laser engraving".
         """
@@ -140,19 +155,21 @@ class DetectionEngine:
         body = text if case_sensitive else text.lower()
         t_norm = _normalize_semantic_tokens(t)
         body_norm = _normalize_semantic_tokens(body)
-        
+
         # First check: exact phrase match (normalized)
         if t in body or t_norm in body_norm:
-            return re.search(re.escape(term), text, flags)
-        
+            return re.search(re.escape(term), text, flags) or re.search(
+                re.escape(_significant_words(term)[0]), text, flags
+            )
+
         # Get all words from term (3+ chars)
-        words = [w for w in re.findall(r"[a-z0-9]+", t) if len(w) >= 3]
+        words = _significant_words(t)
         if not words:
             return None
-            
+
         # Filter out generic words to get specific/product words
         specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
-        
+
         # CRITICAL FIX: Require ALL specific words to match, not just some
         # This prevents "laser marking" from matching "laser engraving"
         if specific:
@@ -165,8 +182,8 @@ class DetectionEngine:
                 return None
             # All specific words found - return match for first word
             return re.search(re.escape(specific[0]), text, flags)
-        
-        # If no specific words (all generic like "laser marking machine"), 
+
+        # If no specific words (all generic like "laser marking machine"),
         # require at least 2 words to match to reduce false positives
         if len(words) >= 2:
             hits = [
@@ -176,8 +193,25 @@ class DetectionEngine:
             # Require ALL words to match for generic phrases
             if len(hits) == len(words):
                 return re.search(re.escape(words[0]), text, flags)
-        
+
         return None
+
+    def _flexible_product_match(
+        self, term: str, text: str, case_sensitive: bool
+    ) -> re.Match[str] | None:
+        """Controlled fallback for IndiaMART product titles saved as exact/ends_with."""
+        if case_sensitive:
+            return None
+        words = _significant_words(term)
+        if len(words) < 2:
+            return None
+        specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
+        if not specific:
+            return None
+        body_norm = _normalize_semantic_tokens(text)
+        if not all(_normalize_semantic_tokens(w) in body_norm for w in specific):
+            return None
+        return re.search(re.escape(specific[0]), text, re.IGNORECASE)
 
     def evaluate_blocks(self, text: str, keywords: list[Any]) -> list[DetectionResult]:
         """Match each lead row/chunk first — location + product usually sit in the same block."""
@@ -224,10 +258,16 @@ class DetectionEngine:
                     match = pattern.search(text)
                     if (
                         not match
-                        and kw.match_type == MatchType.contains
+                        and kw.match_type
+                        in (MatchType.contains, MatchType.exact, MatchType.ends_with)
                         and not kw.case_sensitive
                     ):
-                        match = self._flexible_contains(term, text, kw.case_sensitive)
+                        if kw.match_type == MatchType.contains:
+                            match = self._flexible_contains(term, text, kw.case_sensitive)
+                        else:
+                            match = self._flexible_product_match(
+                                term, text, kw.case_sensitive
+                            )
                     if match:
                         matched_term = term
                         break
@@ -235,7 +275,11 @@ class DetectionEngine:
                     if kw.location_filter:
                         loc_lower = kw.location_filter.lower()
                         text_lower = text.lower()
-                        locations = [l.strip() for l in loc_lower.split(",") if l.strip()]
+                        locations = [
+                            location.strip()
+                            for location in loc_lower.split(",")
+                            if location.strip()
+                        ]
                         location_found = any(loc in text_lower for loc in locations)
                         if not location_found:
                             logger.info(

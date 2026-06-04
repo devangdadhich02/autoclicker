@@ -4,7 +4,7 @@ import asyncio
 import json
 import random
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.automation.action_engine import ActionEngine
@@ -13,14 +13,13 @@ from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
     BuyerLeadBlock,
     click_buyer_lead_block,
-    lead_has_buyer_contact,
     collect_buyer_lead_blocks,
     extract_buyer_details,
     is_weak_match_context,
     lead_fingerprint,
+    lead_has_buyer_contact,
     lead_record_is_complete,
 )
-from app.automation.profile_cookies import load_portable_cookies
 from app.automation.indiamart_page import (
     INDIAMART_LEADS_URL,
     collect_inquiry_text,
@@ -35,19 +34,21 @@ from app.automation.indiamart_page import (
     seller_session_is_authenticated,
     wait_for_page_ready,
 )
-
-# Cap leads processed per poll so contact reveal + heartbeat stay within watchdog budget.
-_MAX_LEADS_PER_SCAN = 10
+from app.automation.profile_cookies import load_portable_cookies
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.session import get_session_factory
+from app.models.action_rule import ActionRule
 from app.models.automation_job import AutomationJob, JobStatus
 from app.models.event_log import EventSeverity
 from app.models.keyword import Keyword
-from app.models.action_rule import ActionRule, ActionType
 from app.services.event_log_service import EventLogService
 from app.services.job_service import JobService
 from app.services.keyword_service import KeywordService
+
+# Cap leads processed per poll so contact reveal + heartbeat stay within watchdog budget.
+_MAX_LEADS_PER_SCAN = 10
+_PARTIAL_CONTACT_RETRY_SECONDS = 10 * 60
 
 # URL path patterns that indicate session has expired (avoid broad "auth" substring)
 _LOGIN_URL_PATTERNS = [
@@ -69,6 +70,16 @@ _LOGIN_PAGE_TEXT_PATTERNS = [
 logger = get_logger(__name__)
 
 
+def _indiamart_recent_leads_url(target_url: str | None = None) -> str:
+    """Always scan the Recent Buy Leads feed, even if a saved job still says relevant."""
+    target = (target_url or "").lower()
+    if "seller.indiamart.com" not in target:
+        return INDIAMART_LEADS_URL
+    if "bltxn" in target and "pref=recent" in target:
+        return target_url or INDIAMART_LEADS_URL
+    return INDIAMART_LEADS_URL
+
+
 class JobRunner:
     """
     Orchestrates a single automation job:
@@ -88,6 +99,8 @@ class JobRunner:
         self._poll_interval = settings.DEFAULT_POLL_INTERVAL_SECONDS
         self._browser_created_at: datetime | None = None
         self._seen_lead_fingerprints: set[str] = set()
+        self._partial_contact_retry_until: dict[str, datetime] = {}
+        self._layout_alert_keys: set[str] = set()
 
     @property
     def is_running(self) -> bool:
@@ -164,7 +177,7 @@ class JobRunner:
                 )
                 break  # shutdown was set
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Normal: poll interval elapsed, continue loop
                 continue
             except Exception as exc:
@@ -265,9 +278,7 @@ class JobRunner:
             if portable:
                 try:
                     await browser.restore_cookies(portable)
-                    leads_url = job.target_url
-                    if "bltxn" not in (leads_url or "").lower():
-                        leads_url = INDIAMART_LEADS_URL
+                    leads_url = _indiamart_recent_leads_url(job.target_url)
                     await ensure_bltxn_leads_page(page, leads_url)
                     if await seller_session_is_authenticated(page):
                         logger.info(
@@ -302,17 +313,13 @@ class JobRunner:
                     snippet or "",
                     re.I,
                 ):
-                    leads_url = job.target_url
-                    if "bltxn" not in (leads_url or "").lower():
-                        leads_url = INDIAMART_LEADS_URL
+                    leads_url = _indiamart_recent_leads_url(job.target_url)
                     await ensure_bltxn_leads_page(page, leads_url)
                     blocks = await collect_buyer_lead_blocks(page)
             except Exception:
                 pass
         if not blocks:
-            leads_url = job.target_url
-            if "bltxn" not in (leads_url or "").lower():
-                leads_url = INDIAMART_LEADS_URL
+            leads_url = _indiamart_recent_leads_url(job.target_url)
             await ensure_bltxn_leads_page(page, leads_url)
             await open_first_lead_card(page)
             await scroll_lead_list(page)
@@ -348,11 +355,23 @@ class JobRunner:
             ):
                 await self._handle_session_expired(page_url)
                 return
+            diagnostic_details = await self._capture_indiamart_diagnostics(
+                page,
+                f"no_buyer_rows_time_{int(has_ago)}",
+            )
             await self._log_event(
-                "scan_no_inquiry_rows",
-                "IndiaMART recent leads list empty or layout changed. Open bltxn manually to verify."
-                + diag,
+                "indiamart_layout_check_needed",
+                (
+                    "IndiaMART is logged in but recent buyer rows were not readable. "
+                    "This can mean empty feed, slow SPA load, or IndiaMART layout changed. "
+                    "Diagnostic screenshot/HTML saved for quick debug."
+                    + diag
+                ),
                 EventSeverity.warning,
+                details=diagnostic_details,
+                job_name=job.name,
+                page_url=page_url,
+                screenshot_path=diagnostic_details.get("screenshot_path"),
             )
             return
 
@@ -393,9 +412,7 @@ class JobRunner:
             return
 
         matches.sort(key=lambda m: (m[1].priority, m[1].score), reverse=True)
-        leads_url = job.target_url
-        if "bltxn" not in (leads_url or "").lower():
-            leads_url = INDIAMART_LEADS_URL
+        leads_url = _indiamart_recent_leads_url(job.target_url)
 
         captured = 0
         partial_saved = 0
@@ -410,6 +427,19 @@ class JobRunner:
                     fingerprint=pre_fp,
                 )
                 continue
+
+            retry_until = self._partial_contact_retry_until.get(pre_fp)
+            if retry_until and retry_until > datetime.now(UTC):
+                logger.info(
+                    "Partial lead contact retry cooling down",
+                    job_id=self.job_id,
+                    keyword=result.keyword_value,
+                    fingerprint=pre_fp,
+                    retry_at=retry_until.isoformat(),
+                )
+                continue
+            if retry_until:
+                self._partial_contact_retry_until.pop(pre_fp, None)
 
             if captured > 0:
                 await ensure_bltxn_leads_page(page, leads_url)
@@ -435,6 +465,10 @@ class JobRunner:
                 )
                 # Persist partial lead so matched inquiries are not completely lost.
                 partial_fp = f"partial:{pre_fp}"
+                retry_at = datetime.now(UTC) + timedelta(
+                    seconds=_PARTIAL_CONTACT_RETRY_SECONDS
+                )
+                self._partial_contact_retry_until[pre_fp] = retry_at
                 if partial_fp not in self._seen_lead_fingerprints:
                     self._seen_lead_fingerprints.add(partial_fp)
                     partial_details = {
@@ -444,6 +478,7 @@ class JobRunner:
                         "page_url": page_url,
                         "lead_fingerprint": partial_fp,
                         "contact_revealed": False,
+                        "next_contact_retry_at": retry_at.isoformat(),
                     }
                     partial_msg = (
                         f"Partial buyer lead — {lead.get('product_title', result.keyword_value)} | "
@@ -461,19 +496,27 @@ class JobRunner:
                         page_url=page_url,
                     )
                     partial_saved += 1
+                diagnostic_details = await self._capture_indiamart_diagnostics(
+                    page,
+                    f"contact_not_revealed_{pre_fp[:32]}",
+                )
                 await self._log_event(
                     "contact_not_revealed",
                     f"Matched '{result.keyword_value}' but could not reveal buyer contact. "
-                    "Open lead manually on IndiaMART or check Buy Lead credits.",
+                    "Open lead manually on IndiaMART or check Buy Lead credits. "
+                    f"Auto retry after {retry_at.isoformat()}.",
                     EventSeverity.warning,
                     keyword_matched=result.keyword_value,
                     details={
                         "block_preview": block.text[:500],
                         "extracted": lead,
                         "row_clicked": clicked,
+                        "next_contact_retry_at": retry_at.isoformat(),
+                        "diagnostic": diagnostic_details,
                     },
                     job_name=job.name,
                     page_url=page_url,
+                    screenshot_path=diagnostic_details.get("screenshot_path"),
                 )
                 continue
             if not lead_record_is_complete(block.text, lead):
@@ -515,6 +558,7 @@ class JobRunner:
                 "context_snippet": block.text[:500],
                 "page_url": page_url,
                 "lead_fingerprint": fp,
+                "contact_revealed": True,
             }
             msg = (
                 f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
@@ -617,17 +661,15 @@ class JobRunner:
 
         if not current_url or current_url == "about:blank":
             start_url = job.target_url
-            if is_indiamart_seller_url(start_url) and "bltxn" not in start_url.lower():
-                start_url = INDIAMART_LEADS_URL
+            if is_indiamart_seller_url(start_url):
+                start_url = _indiamart_recent_leads_url(start_url)
             await self._navigate_to_target(browser, start_url)
             return
 
         if is_indiamart_seller_url(target_lower):
             if is_indiamart_login_url(current_lower):
                 return
-            leads_url = INDIAMART_LEADS_URL
-            if "bltxn" in target_lower or "pref=recent" in target_lower:
-                leads_url = job.target_url
+            leads_url = _indiamart_recent_leads_url(job.target_url)
             await ensure_bltxn_leads_page(page, leads_url)
             await self._heartbeat()
             logger.info(
@@ -782,6 +824,7 @@ class JobRunner:
         details: dict[str, Any] | None = None,
         job_name: str = "",
         page_url: str | None = None,
+        screenshot_path: str | None = None,
     ) -> None:
         from app.services.lead_store import append_lead_row
 
@@ -796,6 +839,7 @@ class JobRunner:
                 job_id=self.job_id,
                 keyword_matched=keyword_matched,
                 details=details_json,
+                screenshot_path=screenshot_path,
             )
             await db.commit()
 
@@ -849,6 +893,61 @@ class JobRunner:
             for _ in range(count):
                 await svc.increment_action_count(self.job_id)
             await db.commit()
+
+    async def _capture_indiamart_diagnostics(
+        self,
+        page: Any,
+        reason: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Save screenshot + HTML when IndiaMART layout/feed/contact extraction looks broken."""
+        safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "_", reason)[:50].strip("_") or "diagnostic"
+        alert_key = safe_reason
+        if not force and alert_key in self._layout_alert_keys:
+            return {"diagnostic_already_captured": True, "reason": reason}
+        self._layout_alert_keys.add(alert_key)
+
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        base = settings.SCREENSHOT_DIR / "indiamart_diagnostics"
+        base.mkdir(parents=True, exist_ok=True)
+        stem = f"{self.job_id}_{safe_reason}_{ts}"
+        details: dict[str, Any] = {
+            "reason": reason,
+            "url": getattr(page, "url", ""),
+        }
+
+        try:
+            png_path = base / f"{stem}.png"
+            await page.screenshot(path=str(png_path), full_page=False)
+            details["screenshot_path"] = str(png_path)
+        except Exception as exc:
+            details["screenshot_error"] = str(exc)[:300]
+
+        try:
+            html = await page.content()
+            html_path = base / f"{stem}.html"
+            html_path.write_text(html, encoding="utf-8", errors="ignore")
+            details["html_snapshot_path"] = str(html_path)
+            details["html_chars"] = len(html)
+        except Exception as exc:
+            details["html_snapshot_error"] = str(exc)[:300]
+
+        try:
+            body = await read_indiamart_page_text(page, 1000)
+            details["body_preview"] = body[:1000]
+            details["body_chars"] = len(body)
+        except Exception:
+            pass
+
+        logger.warning(
+            "IndiaMART diagnostics captured",
+            job_id=self.job_id,
+            reason=reason,
+            screenshot_path=details.get("screenshot_path"),
+            html_snapshot_path=details.get("html_snapshot_path"),
+        )
+        return details
 
     async def _cleanup(self) -> None:
         self._is_running = False
