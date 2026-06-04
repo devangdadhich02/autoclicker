@@ -507,6 +507,13 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     """Click any detail-panel control that likely reveals buyer phone/name."""
     clicked_any = False
     
+    # Debug: Log page state
+    try:
+        page_html = await page.content()
+        logger.info("Contact reveal attempt starting", page_length=len(page_html))
+    except Exception:
+        pass
+    
     # Strategy 1: Try new IndiaMART layout selectors (data-testid and CSS classes)
     contact_selectors = [
         "[data-testid='view-contact-btn']",
@@ -524,20 +531,43 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
         ".contact-reveal-btn",
         ".show-number-btn",
         ".view-mobile-btn",
+        # Additional IndiaMART specific selectors
+        "button:has-text('View Contact')",
+        "button:has-text('View Number')",
+        "button:has-text('Show Number')",
+        "button:has-text('Contact Buyer')",
+        "a:has-text('View Contact')",
+        "a:has-text('View Number')",
+        "[class*='view-contact']",
+        "[class*='show-contact']",
+        "[class*='contact-details'] button",
     ]
     
     for sel in contact_selectors:
         try:
             loc = page.locator(sel).first
-            if await loc.count() > 0:
+            count = await loc.count()
+            if count > 0:
+                logger.info("Found contact reveal element", selector=sel)
+                try:
+                    text = await loc.inner_text(timeout=1000)
+                    logger.info("Contact button text", text=text[:50])
+                except:
+                    pass
                 await loc.scroll_into_view_if_needed(timeout=2000)
                 await loc.click(timeout=4000)
-                await page.wait_for_timeout(2500)
+                await page.wait_for_timeout(3000)
                 clicked_any = True
                 logger.info("Clicked contact reveal button via selector", selector=sel)
                 break
-        except Exception:
+            else:
+                logger.debug("Selector not found", selector=sel)
+        except Exception as e:
+            logger.debug("Selector failed", selector=sel, error=str(e)[:100])
             continue
+    
+    if not clicked_any:
+        logger.warning("No contact reveal button found with CSS selectors, trying text-based")
     
     if not clicked_any:
         # Strategy 2: Try text-based labels (legacy approach)
@@ -994,32 +1024,36 @@ async def extract_buyer_details(
                     except Exception:
                         continue
             else:
+                logger.warning("All selector strategies failed, trying JavaScript fallback")
                 # Fallback click pass inside probable details panel controls.
                 try:
                     clicked = await page.evaluate(
                         """() => {
                           const panel = document.querySelector('[class*="detail"], [class*="inqry"], [class*="byr"]') || document.body;
-                          const want = /view|contact|mobile|phone|number|call|whatsapp/i;
-                          const deny = /close|cancel|back|share|login|sign in|filter|search/i;
+                          const want = /view|contact|mobile|phone|number|call|whatsapp|buyer/i;
+                          const deny = /close|cancel|back|share|login|sign in|filter|search|interested/i;
                           let count = 0;
+                          let clickedElements = [];
                           for (const el of panel.querySelectorAll('button, a, [role="button"], span, div')) {
                             const t = (el.innerText || el.textContent || '').trim();
-                            if (!t || t.length < 3 || t.length > 50) continue;
+                            if (!t || t.length < 3 || t.length > 60) continue;
                             if (!want.test(t) || deny.test(t)) continue;
                             const r = el.getBoundingClientRect();
                             if (r.width < 2 || r.height < 2) continue;
                             try {
                               el.click();
+                              clickedElements.push(t.substring(0, 50));
                               count++;
                             } catch (e) {}
                             if (count >= 4) break;
                           }
-                          return count;
+                          return {count: count, clicked: clickedElements, pageText: document.body.innerText.substring(0, 500)};
                         }"""
                     )
-                    if clicked and int(clicked) > 0:
-                        await page.wait_for_timeout(1800)
-                        await _wait_for_contact_signal(page, timeout_ms=5000)
+                    logger.info("JavaScript fallback result", clicked_data=clicked)
+                    if clicked and clicked.get('count', 0) > 0:
+                        await page.wait_for_timeout(2500)
+                        await _wait_for_contact_signal(page, timeout_ms=7000)
                         panel_text = await _read_detail_panel_text(page)
                         _apply_panel_text_to_lead(lead, panel_text, block_text)
                         dom_contact = await _scrape_contact_from_dom(page)
