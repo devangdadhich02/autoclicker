@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
 from playwright.async_api import Page
+
+logger = logging.getLogger(__name__)
 
 from app.automation.indiamart_page import (
     INQUIRY_ROW_SELECTORS,
