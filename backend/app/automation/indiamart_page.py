@@ -311,6 +311,34 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
     and tries multiple selector strategies.
     """
     
+    # Strategy 0: Try new IndiaMART layout selectors first (2024-2025)
+    try:
+        new_selectors = [
+            "[data-testid='buy-leads-link']",
+            "[data-testid='recent-buy-leads']",
+            "a[href*='bltxn']",
+            "a[href*='/bltxn/']",
+            "[class*='BuyLeads']",
+            "[class*='buy-leads']",
+            "nav a:has-text('Buy Leads')",
+            "aside a:has-text('Buy Leads')",
+            "sidebar a:has-text('Buy Leads')",
+            "li:has-text('Buy Leads') a",
+        ]
+        for sel in new_selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    await loc.scroll_into_view_if_needed(timeout=2000)
+                    await loc.click(timeout=5000)
+                    logger.info(f"Strategy 0 success with selector: {sel}")
+                    await page.wait_for_timeout(5000)  # Wait longer for SPA
+                    return True
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"Strategy 0 failed: {e}")
+    
     # Strategy 1: Direct href navigation via JS evaluation
     try:
         clicked = await page.evaluate(
@@ -346,7 +374,7 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
         )
         if clicked and clicked.get('success'):
             logger.info(f"Strategy 1 success: {clicked.get('text', 'unknown')}")
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(5000)  # Increased wait
             return True
     except Exception as e:
         logger.warning(f"Strategy 1 failed: {e}")
@@ -452,14 +480,26 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         # Fallback: networkidle only if DOM looks incomplete
         try:
             await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-            # Short wait for React to hydrate
-            await page.wait_for_timeout(2000)
+            # Increased wait for React to hydrate - new IndiaMART is slower
+            await page.wait_for_timeout(4000)
         except Exception as e:
             logger.warning(f"domcontentloaded navigation failed: {e}, trying networkidle")
             try:
                 await page.goto(target, wait_until="networkidle", timeout=45_000)
+                await page.wait_for_timeout(3000)
             except Exception as e2:
                 logger.error(f"Navigation failed: {e2}")
+        
+        # Try alternative URLs for new IndiaMART layout
+        if attempt == 1:
+            try:
+                # Try the newer bltxn endpoint format
+                alt_target = "https://seller.indiamart.com/bltxn/?pref=relevant"
+                logger.info(f"Trying alternative URL: {alt_target}")
+                await page.goto(alt_target, wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(4000)
+            except Exception as e:
+                logger.warning(f"Alternative URL failed: {e}")
         
         # If still no time markers, try dashboard home first then navigate
         if attempt >= 1:
