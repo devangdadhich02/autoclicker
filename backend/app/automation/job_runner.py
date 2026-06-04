@@ -279,7 +279,9 @@ class JobRunner:
                 try:
                     await browser.restore_cookies(portable)
                     leads_url = _indiamart_recent_leads_url(job.target_url)
-                    await ensure_bltxn_leads_page(page, leads_url)
+                    await ensure_bltxn_leads_page(
+                        page, leads_url, heartbeat=self._heartbeat
+                    )
                     if await seller_session_is_authenticated(page):
                         logger.info(
                             "Session restored from portable cookies",
@@ -314,13 +316,15 @@ class JobRunner:
                     re.I,
                 ):
                     leads_url = _indiamart_recent_leads_url(job.target_url)
-                    await ensure_bltxn_leads_page(page, leads_url)
+                    await ensure_bltxn_leads_page(
+                        page, leads_url, heartbeat=self._heartbeat
+                    )
                     blocks = await collect_buyer_lead_blocks(page)
             except Exception:
                 pass
         if not blocks:
             leads_url = _indiamart_recent_leads_url(job.target_url)
-            await ensure_bltxn_leads_page(page, leads_url)
+            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
             await open_first_lead_card(page)
             await scroll_lead_list(page)
             blocks = await collect_buyer_lead_blocks(page)
@@ -442,7 +446,7 @@ class JobRunner:
                 self._partial_contact_retry_until.pop(pre_fp, None)
 
             if captured > 0:
-                await ensure_bltxn_leads_page(page, leads_url)
+                await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
                 await scroll_lead_list(page)
 
             clicked = await click_buyer_lead_block(page, block)
@@ -670,7 +674,7 @@ class JobRunner:
             if is_indiamart_login_url(current_lower):
                 return
             leads_url = _indiamart_recent_leads_url(job.target_url)
-            await ensure_bltxn_leads_page(page, leads_url)
+            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
             await self._heartbeat()
             logger.info(
                 "IndiaMART page load",

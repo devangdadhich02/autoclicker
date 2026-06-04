@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from playwright.async_api import Page
@@ -257,11 +258,18 @@ async def open_buy_leads_main_panel(page: Page) -> bool:
         # Most reliable path: links that explicitly route to bltxn.
         href_hit = await page.evaluate(
             """() => {
-              const links = [...document.querySelectorAll('a[href*="bltxn"], a[href*="pref=recent"]')];
-              for (const a of links) {
-                const r = a.getBoundingClientRect();
-                if (r.width < 6 || r.height < 6) continue;
-                try { a.click(); return true; } catch (e) {}
+              const all = [...document.querySelectorAll('a[href*="bltxn"], a[href*="pref=recent"]')];
+              const groups = [
+                all.filter(a => (a.getAttribute('href') || '').toLowerCase().includes('pref=recent')),
+                all.filter(a => !(a.getAttribute('href') || '').toLowerCase().includes('pref=relevant')),
+                all,
+              ];
+              for (const links of groups) {
+                for (const a of links) {
+                  const r = a.getBoundingClientRect();
+                  if (r.width < 6 || r.height < 6) continue;
+                  try { a.click(); return true; } catch (e) {}
+                }
               }
               return false;
             }"""
@@ -316,6 +324,7 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
         new_selectors = [
             "[data-testid='buy-leads-link']",
             "[data-testid='recent-buy-leads']",
+            "a[href*='pref=recent']",
             "a[href*='bltxn']",
             "a[href*='/bltxn/']",
             "[class*='BuyLeads']",
@@ -466,41 +475,45 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
     return False
 
 
-async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEADS_URL) -> None:
+async def ensure_bltxn_leads_page(
+    page: Page,
+    fallback_url: str = INDIAMART_LEADS_URL,
+    heartbeat: Callable[[], Awaitable[None]] | None = None,
+) -> None:
     """Open recent buy leads with full URL + reload so persisted cookies apply."""
-    
+
+    async def beat() -> None:
+        if heartbeat is None:
+            return
+        try:
+            await heartbeat()
+        except Exception:
+            pass
+
     target = INDIAMART_LEADS_URL
     if "bltxn" in (fallback_url or "").lower():
         target = fallback_url
-    
+
     for attempt in range(3):  # 3 attempts with increasing delays
+        await beat()
         logger.info(f"ensure_bltxn_leads_page attempt {attempt + 1}/3, target={target}")
-        
+
         # Primary: domcontentloaded (faster, more reliable for IndiaMART SPA)
         # Fallback: networkidle only if DOM looks incomplete
         try:
             await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
             # Increased wait for React to hydrate - new IndiaMART is slower
             await page.wait_for_timeout(4000)
+            await beat()
         except Exception as e:
             logger.warning(f"domcontentloaded navigation failed: {e}, trying networkidle")
             try:
                 await page.goto(target, wait_until="networkidle", timeout=45_000)
                 await page.wait_for_timeout(3000)
+                await beat()
             except Exception as e2:
                 logger.error(f"Navigation failed: {e2}")
-        
-        # Try alternative URLs for new IndiaMART layout
-        if attempt == 1:
-            try:
-                # Try the newer bltxn endpoint format
-                alt_target = "https://seller.indiamart.com/bltxn/?pref=relevant"
-                logger.info(f"Trying alternative URL: {alt_target}")
-                await page.goto(alt_target, wait_until="domcontentloaded", timeout=30_000)
-                await page.wait_for_timeout(4000)
-            except Exception as e:
-                logger.warning(f"Alternative URL failed: {e}")
-        
+
         # If still no time markers, try dashboard home first then navigate
         if attempt >= 1:
             try:
@@ -512,6 +525,7 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
                     timeout=30_000,
                 )
                 await page.wait_for_timeout(2000)
+                await beat()
                 # Use React Router hash navigation
                 await page.evaluate(
                     """() => {
@@ -524,16 +538,17 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
                 # Final load with domcontentloaded
                 await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
                 await page.wait_for_timeout(1500)
+                await beat()
             except Exception as e:
                 logger.warning(f"Dashboard-first navigation failed: {e}")
-        
+
         # Ensure proper URL with hash routing if needed
         try:
             await page.wait_for_timeout(2000)
             current_url = page.url or ""
             logger.info(f"Current URL after navigation: {current_url}")
-            
-            if "bltxn" not in current_url.lower():
+
+            if "bltxn" not in current_url.lower() or "pref=relevant" in current_url.lower():
                 logger.info("Forcing bltxn URL via window.location")
                 await page.evaluate(
                     f"""() => {{
@@ -541,7 +556,8 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
                     }}"""
                 )
                 await page.wait_for_timeout(4000)
-            
+                await beat()
+
             # Wait for network to be idle (API calls complete)
             try:
                 await page.wait_for_load_state("networkidle", timeout=20_000)
@@ -556,11 +572,25 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         # Try to open Buy Leads panel with enhanced click simulation
         panel_opened = await open_buy_leads_main_panel(page)
         logger.info(f"Buy Leads panel opened: {panel_opened}")
-        
+        await beat()
+
+        if "pref=relevant" in (page.url or "").lower():
+            logger.info("Buy Leads click landed on relevant feed, forcing recent feed")
+            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(2500)
+            await beat()
+
         # Try to click Recent tab
         recent_clicked = await click_recent_buy_leads_tab(page)
         logger.info(f"Recent tab clicked: {recent_clicked}")
-        
+        await beat()
+
+        if "pref=relevant" in (page.url or "").lower():
+            logger.info("Recent tab click left relevant feed active, forcing recent feed")
+            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(2500)
+            await beat()
+
         # Wait for time markers to appear
         time_markers_found = False
         try:
@@ -575,9 +605,10 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
             logger.info("Time markers found in DOM")
         except Exception:
             logger.warning("Time markers not found within timeout")
-        
+        await beat()
+
         await scroll_lead_list(page)
-        
+
         # Check current state
         body = await read_indiamart_page_text(page, 12_000)
         has_time_ago = bool(_TIME_AGO_RE.search(body))
@@ -596,15 +627,21 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
                 # Hard reload with cache clear
                 await page.evaluate("() => { location.reload(true); }")
                 await page.wait_for_timeout(3000)
-                
+                await beat()
+
                 # Re-navigate with domcontentloaded (faster)
                 await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
                 await page.wait_for_timeout(2000)
-                
+                await beat()
+
                 # Try aggressive panel opening
                 await _aggressive_open_buy_leads(page)
+                if "pref=relevant" in (page.url or "").lower():
+                    await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+                    await page.wait_for_timeout(2500)
+                await beat()
                 await scroll_lead_list(page)
-                
+
                 body = await read_indiamart_page_text(page, 12_000)
                 has_time_ago = bool(_TIME_AGO_RE.search(body))
                 logger.info(f"After hard reload - has_time_ago: {has_time_ago}")
@@ -615,7 +652,7 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         if has_time_ago:
             logger.info("Success: Time markers found, breaking out of retry loop")
             break
-            
+
         if not is_indiamart_marketing_landing(body):
             logger.info("Not on marketing landing, assuming logged in")
             # Still try to get time markers one more time
@@ -629,9 +666,18 @@ async def ensure_bltxn_leads_page(page: Page, fallback_url: str = INDIAMART_LEAD
         if attempt < 2:
             logger.info(f"Retrying navigation (attempt {attempt + 2}/3)")
             await asyncio.sleep(3)
-    
+
+    if "pref=relevant" in (page.url or "").lower():
+        logger.info("Final URL still relevant, forcing recent before returning")
+        try:
+            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(2500)
+            await beat()
+        except Exception:
+            pass
+
     await scroll_lead_list(page)
-    
+
     # Final check
     final_body = await read_indiamart_page_text(page, 8_000)
     final_has_time = bool(_TIME_AGO_RE.search(final_body))
