@@ -761,26 +761,7 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
         logger.warning("No contact reveal button found with CSS selectors, trying text-based")
 
     if not clicked_any:
-        # Strategy 2: Try text-based labels (legacy approach)
-        for label in _INTEREST_BUTTON_LABELS:
-            for role in ("button", "link"):
-                try:
-                    loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
-                    n = await loc.count()
-                    for i in range(min(n, 2)):
-                        try:
-                            el = loc.nth(i)
-                            await el.scroll_into_view_if_needed(timeout=3000)
-                            await el.click(timeout=5000)
-                            await page.wait_for_timeout(2200)
-                            clicked_any = True
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-
-    if not clicked_any:
-        # Strategy 3: Try contact reveal labels
+        # Strategy 2: Try explicit contact reveal labels before generic interest buttons.
         for label in _CONTACT_REVEAL_LABELS:
             for role in ("button", "link"):
                 try:
@@ -792,6 +773,25 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
                             await el.scroll_into_view_if_needed(timeout=3000)
                             await el.click(timeout=4000)
                             await page.wait_for_timeout(1800)
+                            clicked_any = True
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+    if not clicked_any:
+        # Strategy 3: Some IndiaMART rows reveal contact only after the interest CTA.
+        for label in _INTEREST_BUTTON_LABELS:
+            for role in ("button", "link"):
+                try:
+                    loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
+                    n = await loc.count()
+                    for i in range(min(n, 2)):
+                        try:
+                            el = loc.nth(i)
+                            await el.scroll_into_view_if_needed(timeout=3000)
+                            await el.click(timeout=5000)
+                            await page.wait_for_timeout(2200)
                             clicked_any = True
                         except Exception:
                             continue

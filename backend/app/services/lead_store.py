@@ -43,7 +43,7 @@ def _job_csv_path(job_id: str, job_name: str) -> Path:
 
 
 def load_seen_lead_fingerprints(job_id: str, job_name: str) -> set[str]:
-    """Fingerprints already saved for this job — avoids re-counting the same buyer row."""
+    """Fingerprints already saved for this job — avoids re-counting completed leads."""
     path = _job_csv_path(job_id, job_name)
     seen: set[str] = set()
     if not path.exists():
@@ -65,7 +65,10 @@ def load_seen_lead_fingerprints(job_id: str, job_name: str) -> set[str]:
                 )
                 contact_revealed = (row.get("contact_revealed") or "").strip().lower()
                 if fp and contact_revealed != "true":
-                    seen.add(fp if fp.startswith("partial:") else f"partial:{fp}")
+                    # Partial rows are intentionally retryable after process restart.
+                    # The runner keeps an in-memory cooldown while it is alive, but a
+                    # saved "contact not revealed" row must not permanently block a
+                    # later scan from opening the same buyer and capturing phone/email.
                     continue
                 if fp:
                     seen.add(fp.removeprefix("partial:"))
@@ -87,6 +90,10 @@ def append_lead_row(
 ) -> Path | None:
     """Append one lead row to per-job CSV under /data/leads (survives restarts)."""
     details = details or {}
+    contact_revealed = details.get("contact_revealed", "")
+    if isinstance(contact_revealed, bool):
+        contact_revealed = "true" if contact_revealed else "false"
+
     row = {
         "timestamp": datetime.now(UTC).isoformat(),
         "job_id": job_id,
@@ -106,7 +113,7 @@ def append_lead_row(
         "context_snippet": context_snippet or details.get("context_snippet", ""),
         "page_url": page_url or "",
         "lead_fingerprint": details.get("lead_fingerprint", ""),
-        "contact_revealed": details.get("contact_revealed", ""),
+        "contact_revealed": contact_revealed,
         "next_contact_retry_at": details.get("next_contact_retry_at", ""),
     }
 

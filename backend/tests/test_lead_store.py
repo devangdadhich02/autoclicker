@@ -21,7 +21,7 @@ def test_partial_lead_does_not_block_future_contact_retry(tmp_path, monkeypatch)
 
     seen = load_seen_lead_fingerprints("job-12345678", "IndiaMART")
 
-    assert "partial:pk:laser welding machine|kheda, gujarat" in seen
+    assert "partial:pk:laser welding machine|kheda, gujarat" not in seen
     assert "pk:laser welding machine|kheda, gujarat" not in seen
 
 
