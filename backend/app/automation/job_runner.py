@@ -306,23 +306,7 @@ class JobRunner:
                 return
         blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
-            try:
-                snippet = await page.evaluate(
-                    "() => (document.body.innerText || '').slice(0, 600)"
-                )
-                if re.search(
-                    r"(?:just\s+now|\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago)",
-                    snippet or "",
-                    re.I,
-                ):
-                    leads_url = _indiamart_recent_leads_url(job.target_url)
-                    await ensure_bltxn_leads_page(
-                        page, leads_url, heartbeat=self._heartbeat
-                    )
-                    blocks = await collect_buyer_lead_blocks(page)
-            except Exception:
-                pass
-        if not blocks:
+            # Single consolidated re-navigation attempt
             leads_url = _indiamart_recent_leads_url(job.target_url)
             await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
             await open_first_lead_card(page)
@@ -446,7 +430,11 @@ class JobRunner:
                 self._partial_contact_retry_until.pop(pre_fp, None)
 
             if captured > 0:
-                await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+                # Navigate back to feed after detail panel - lightweight vs full re-nav
+                try:
+                    await page.go_back(timeout=10_000, wait_until="domcontentloaded")
+                except Exception:
+                    pass
                 await scroll_lead_list(page)
 
             clicked = await click_buyer_lead_block(page, block)
@@ -674,12 +662,20 @@ class JobRunner:
             if is_indiamart_login_url(current_lower):
                 return
             leads_url = _indiamart_recent_leads_url(job.target_url)
-            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
-            await self._heartbeat()
+            # Skip re-navigation if already on the correct bltxn recent page
+            already_on_leads = (
+                "bltxn" in current_lower
+                and "pref=recent" in current_lower
+                and "seller.indiamart.com" in current_lower
+            )
+            if not already_on_leads:
+                await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+                await self._heartbeat()
             logger.info(
                 "IndiaMART page load",
                 job_id=self.job_id,
                 ready=True,
+                already_on_leads=already_on_leads,
                 url=page.url,
             )
             return

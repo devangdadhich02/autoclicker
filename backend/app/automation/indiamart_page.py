@@ -185,34 +185,37 @@ async def wait_for_page_ready(page: Page, timeout_ms: int = 45_000) -> bool:
 
 
 async def click_recent_buy_leads_tab(page: Page) -> bool:
-    """Ensure the Recent (not Missed/All) buy-leads tab is active."""
-    patterns = (
-        re.compile(r"^recent\s*buy\s*leads?$", re.I),
-        re.compile(r"^recent$", re.I),
-        re.compile(r"buy\s*leads", re.I),
-    )
-    for pattern in patterns:
+    """Ensure the Recent (not Missed/All) buy-leads tab is active.
+    Only clicks tab elements — not the sidebar nav link (which causes re-navigation)."""
+    # Only click tab-like elements (role=tab, or button/span with exact "Recent" text)
+    tab_selectors = [
+        "[role='tab']:has-text('Recent')",
+        "button:has-text('Recent Buy Leads')",
+        "button:has-text('Recent')",
+        "[data-testid='recent-tab']",
+        "[data-testid='recent-buy-leads-tab']",
+    ]
+    for sel in tab_selectors:
         try:
-            loc = page.get_by_text(pattern)
-            n = await loc.count()
-            for i in range(min(n, 5)):
-                try:
-                    await loc.nth(i).click(timeout=5000)
-                    await page.wait_for_timeout(2000)
-                    return True
-                except Exception:
-                    continue
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                await loc.click(timeout=3000)
+                await page.wait_for_timeout(1000)
+                return True
         except Exception:
             continue
     try:
         clicked = await page.evaluate(
             """() => {
-              const want = ['recent buy leads', 'recent', 'buy leads'];
-              const nodes = [...document.querySelectorAll('a, button, span, div, li')];
-              for (const el of nodes) {
+              // Only click tab-role elements or buttons, not sidebar <a> nav links
+              const tabNodes = [...document.querySelectorAll(
+                '[role="tab"], button, [class*="tab"]'
+              )];
+              for (const el of tabNodes) {
                 const t = (el.innerText || '').trim().toLowerCase();
-                if (!t || t.length > 40) continue;
-                if (want.some(w => t === w || t.startsWith(w))) {
+                if (t === 'recent' || t === 'recent buy leads') {
+                  const r = el.getBoundingClientRect();
+                  if (r.width < 4 || r.height < 4) continue;
                   el.click();
                   return true;
                 }
@@ -221,7 +224,7 @@ async def click_recent_buy_leads_tab(page: Page) -> bool:
             }"""
         )
         if clicked:
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
             return True
     except Exception:
         pass
@@ -494,191 +497,118 @@ async def ensure_bltxn_leads_page(
     if "bltxn" in (fallback_url or "").lower():
         target = fallback_url
 
-    for attempt in range(3):  # 3 attempts with increasing delays
+    for attempt in range(3):
         await beat()
         logger.info(f"ensure_bltxn_leads_page attempt {attempt + 1}/3, target={target}")
 
-        # Primary: domcontentloaded (faster, more reliable for IndiaMART SPA)
-        # Fallback: networkidle only if DOM looks incomplete
+        # Navigate directly to recent leads URL
         try:
-            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-            # Increased wait for React to hydrate - new IndiaMART is slower
-            await page.wait_for_timeout(4000)
+            await page.goto(target, wait_until="domcontentloaded", timeout=35_000)
+            await page.wait_for_timeout(2000)
             await beat()
         except Exception as e:
-            logger.warning(f"domcontentloaded navigation failed: {e}, trying networkidle")
-            try:
-                await page.goto(target, wait_until="networkidle", timeout=45_000)
-                await page.wait_for_timeout(3000)
-                await beat()
-            except Exception as e2:
-                logger.error(f"Navigation failed: {e2}")
+            logger.warning(f"Navigation failed: {e}")
 
-        # If still no time markers, try dashboard home first then navigate
-        if attempt >= 1:
+        current_url = page.url or ""
+        logger.info(f"Current URL after navigation: {current_url}")
+
+        # Fix: if landed on relevant feed, force recent
+        if "pref=relevant" in current_url.lower():
             try:
-                logger.info("Trying dashboard-first navigation strategy")
-                # Load dashboard with shorter timeout
-                await page.goto(
-                    "https://seller.indiamart.com/",
-                    wait_until="domcontentloaded",
-                    timeout=30_000,
-                )
-                await page.wait_for_timeout(2000)
-                await beat()
-                # Use React Router hash navigation
-                await page.evaluate(
-                    """() => {
-                        window.location.hash = '#/bltxn?pref=recent';
-                        // Trigger hashchange for React Router
-                        window.dispatchEvent(new HashChangeEvent('hashchange'));
-                    }"""
-                )
-                await page.wait_for_timeout(3000)
-                # Final load with domcontentloaded
                 await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
                 await page.wait_for_timeout(1500)
                 await beat()
-            except Exception as e:
-                logger.warning(f"Dashboard-first navigation failed: {e}")
-
-        # Ensure proper URL with hash routing if needed
-        try:
-            await page.wait_for_timeout(2000)
-            current_url = page.url or ""
-            logger.info(f"Current URL after navigation: {current_url}")
-
-            if "bltxn" not in current_url.lower() or "pref=relevant" in current_url.lower():
-                logger.info("Forcing bltxn URL via window.location")
-                await page.evaluate(
-                    f"""() => {{
-                        window.location.href = '{target}';
-                    }}"""
-                )
-                await page.wait_for_timeout(4000)
-                await beat()
-
-            # Wait for network to be idle (API calls complete)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=20_000)
             except Exception:
                 pass
-        except Exception as e:
-            logger.warning(f"URL manipulation error: {e}")
-        
-        # Wait for page to be ready
-        await wait_for_page_ready(page)
-        
-        # Try to open Buy Leads panel with enhanced click simulation
-        panel_opened = await open_buy_leads_main_panel(page)
-        logger.info(f"Buy Leads panel opened: {panel_opened}")
+
+        # Wait for network calls to settle (SPA data fetch)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            pass
         await beat()
 
-        if "pref=relevant" in (page.url or "").lower():
-            logger.info("Buy Leads click landed on relevant feed, forcing recent feed")
-            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_timeout(2500)
-            await beat()
-
-        # Try to click Recent tab
+        # Try clicking Recent tab to ensure the feed is visible
         recent_clicked = await click_recent_buy_leads_tab(page)
         logger.info(f"Recent tab clicked: {recent_clicked}")
         await beat()
 
-        if "pref=relevant" in (page.url or "").lower():
-            logger.info("Recent tab click left relevant feed active, forcing recent feed")
-            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_timeout(2500)
-            await beat()
-
-        # Wait for time markers to appear
-        time_markers_found = False
+        # Wait for time markers (real leads) to appear - short timeout
         try:
             await page.wait_for_function(
                 """() => {
                   const t = document.body.innerText || '';
                   return /just\\s+now|\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
                 }""",
-                timeout=20_000,
+                timeout=12_000,
             )
-            time_markers_found = True
             logger.info("Time markers found in DOM")
+            await beat()
+            await scroll_lead_list(page)
+            break  # success — leads are visible
         except Exception:
             logger.warning("Time markers not found within timeout")
-        await beat()
 
+        await beat()
         await scroll_lead_list(page)
 
-        # Check current state
-        body = await read_indiamart_page_text(page, 12_000)
+        # Check if page has real lead content (even without time markers)
+        body = await read_indiamart_page_text(page, 4_000)
         has_time_ago = bool(_TIME_AGO_RE.search(body))
         logger.info(f"Page check - has_time_ago: {has_time_ago}, body_length: {len(body)}")
-        
+
+        # Nav-only shell: body is small and only has menu items, no lead data
         nav_only = (
-            "buy leads" in body.lower()
+            not has_time_ago
+            and len(body) < 1500
+            and "buy leads" in body.lower()
             and "dashboard" in body.lower()
-            and not has_time_ago
         )
-        
-        if nav_only:
+
+        if nav_only and attempt < 2:
             logger.warning("SPA stuck on nav-only view, forcing hard reload")
-            # SPA sometimes lands on shell-only view (menu chrome). Force real route.
             try:
-                # Hard reload with cache clear
+                # Hard reload bypasses SPA cache
                 await page.evaluate("() => { location.reload(true); }")
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(4000)
                 await beat()
-
-                # Re-navigate with domcontentloaded (faster)
-                await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-                await page.wait_for_timeout(2000)
-                await beat()
-
-                # Try aggressive panel opening
-                await _aggressive_open_buy_leads(page)
-                if "pref=relevant" in (page.url or "").lower():
-                    await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-                    await page.wait_for_timeout(2500)
-                await beat()
-                await scroll_lead_list(page)
-
-                body = await read_indiamart_page_text(page, 12_000)
-                has_time_ago = bool(_TIME_AGO_RE.search(body))
-                logger.info(f"After hard reload - has_time_ago: {has_time_ago}")
             except Exception as e:
                 logger.error(f"Hard reload failed: {e}")
-        
-        # If we have time markers or we're not on marketing landing, we're good
+            body = await read_indiamart_page_text(page, 4_000)
+            has_time_ago = bool(_TIME_AGO_RE.search(body))
+            logger.info(f"After hard reload - has_time_ago: {has_time_ago}")
+
+            if not is_indiamart_marketing_landing(body):
+                logger.info("Not on marketing landing, assuming logged in")
+                # Continue retry loop to try navigation again
+                continue
+
+        # If we have time markers, we're done
         if has_time_ago:
             logger.info("Success: Time markers found, breaking out of retry loop")
             break
 
         if not is_indiamart_marketing_landing(body):
             logger.info("Not on marketing landing, assuming logged in")
-            # Still try to get time markers one more time
             if attempt < 2:
                 continue
             break
-        
-        # Marketing landing detected, need to retry
+
         logger.warning(f"Marketing landing detected on attempt {attempt + 1}")
-        
         if attempt < 2:
-            logger.info(f"Retrying navigation (attempt {attempt + 2}/3)")
             await asyncio.sleep(3)
 
     if "pref=relevant" in (page.url or "").lower():
         logger.info("Final URL still relevant, forcing recent before returning")
         try:
             await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_timeout(2500)
+            await page.wait_for_timeout(1500)
             await beat()
         except Exception:
             pass
 
     await scroll_lead_list(page)
 
-    # Final check
     final_body = await read_indiamart_page_text(page, 8_000)
     final_has_time = bool(_TIME_AGO_RE.search(final_body))
     logger.info(f"ensure_bltxn_leads_page complete - final_has_time: {final_has_time}")

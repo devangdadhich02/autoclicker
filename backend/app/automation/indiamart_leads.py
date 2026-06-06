@@ -354,36 +354,13 @@ def is_plausible_buyer_phone(
     block = block_text or ""
     panel_digits = re.sub(r"\D", "", panel)
     block_digits = re.sub(r"\D", "", block)
-    if d in panel_digits and len(panel) > 40:
-        pl = panel.lower()
-        if any(
-            x in pl
-            for x in (
-                "buyer",
-                "contact",
-                "mobile",
-                "phone",
-                "member",
-                "view number",
-                "call buyer",
-            )
-        ):
-            return True
+    # Phone found in panel text (contact reveal popup) — accept it.
+    # IndiaMART popup shows number directly; context words may not appear in scraped text.
+    if d in panel_digits and len(panel) > 20:
+        return True
+    # Phone found in lead card text alongside a time marker — accept it.
     if d in block_digits and _TIME_RE.search(block):
-        bl = block.lower()
-        if any(
-            x in bl
-            for x in (
-                "interested",
-                "requirement",
-                "sold out",
-                "business use",
-                "category",
-                "laser",
-                "machine",
-            )
-        ):
-            return True
+        return True
     return False
 
 
@@ -394,19 +371,49 @@ def sanitize_lead_contacts(
     out = dict(lead)
     if out.get("buyer_name"):
         out["buyer_name"] = sanitize_buyer_name(str(out["buyer_name"]))
-    phone = normalize_phone_digits(str(out.get("buyer_phone") or ""))
-    if phone and is_plausible_buyer_phone(phone, block_text, panel_text):
-        out["buyer_phone"] = phone
-    else:
-        out.pop("buyer_phone", None)
+    
+    phone_raw = str(out.get("buyer_phone") or "").strip()
+    if phone_raw:
+        # Check if it's an international number (starts with +)
+        if phone_raw.startswith("+"):
+            digits = re.sub(r"\D", "", phone_raw)
+            if 8 <= len(digits) <= 15 and digits not in _KNOWN_NAV_PHONES:
+                out["buyer_phone"] = phone_raw  # Keep the + format
+            else:
+                out.pop("buyer_phone", None)
+        else:
+            # Normalize to digits only
+            phone = normalize_phone_digits(phone_raw)
+            if phone in _KNOWN_NAV_PHONES:
+                out.pop("buyer_phone", None)
+            elif re.match(r"^[6-9]\d{9}$", phone):
+                # Valid Indian mobile (10 digits, starts with 6-9)
+                out["buyer_phone"] = phone
+            elif re.match(r"^0[1-9]\d{9,11}$", phone):
+                # Valid Indian landline (11-12 digits, starts with 0 + STD code)
+                out["buyer_phone"] = phone
+            elif len(phone) >= 8 and len(phone) <= 15:
+                # Other valid phone (international without +, or other format)
+                out["buyer_phone"] = phone
+            else:
+                out.pop("buyer_phone", None)
     return out
 
 
 def lead_has_buyer_contact(lead: dict[str, str]) -> bool:
     """Phone (or email) after opening lead / clicking reveal — required for actionable leads."""
-    phone = normalize_phone_digits(lead.get("buyer_phone") or "")
-    if phone and len(phone) >= 10:
-        return True
+    phone_raw = (lead.get("buyer_phone") or "").strip()
+    if phone_raw:
+        # International number with + prefix
+        if phone_raw.startswith("+"):
+            digits = re.sub(r"\D", "", phone_raw)
+            if len(digits) >= 8:
+                return True
+        else:
+            # Indian mobile/landline or other
+            phone = normalize_phone_digits(phone_raw)
+            if len(phone) >= 8:
+                return True
     return bool((lead.get("buyer_email") or "").strip())
 
 
@@ -698,37 +705,31 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     """Click any detail-panel control that likely reveals buyer phone/name."""
     clicked_any = False
 
-    # Debug: Log page state
-    try:
-        page_html = await page.content()
-        logger.info("Contact reveal attempt starting", page_length=len(page_html))
-    except Exception:
-        pass
-
-    # Strategy 1: Try new IndiaMART layout selectors (data-testid and CSS classes)
+    # Strategy 1: CSS selectors + Playwright has-text (most reliable, fastest)
     contact_selectors = [
+        # data-testid selectors
         "[data-testid='view-contact-btn']",
         "[data-testid='contact-button']",
         "[data-testid='view-number']",
         "[data-testid='show-mobile']",
         "[data-testid='reveal-contact']",
-        "button[class*='contact']",
-        "button[class*='view-number']",
-        "button[class*='show-mobile']",
-        "a[class*='contact']",
-        "span[class*='contact']",
-        "div[class*='contact-btn']",
-        ".view-contact-btn",
-        ".contact-reveal-btn",
-        ".show-number-btn",
-        ".view-mobile-btn",
-        # Additional IndiaMART specific selectors
+        # Playwright has-text: matches visible text content
+        "button:has-text('View Mobile No.')",
+        "button:has-text('View Contact Details')",
         "button:has-text('View Contact')",
         "button:has-text('View Number')",
         "button:has-text('Show Number')",
         "button:has-text('Contact Buyer')",
+        "a:has-text('View Mobile No.')",
         "a:has-text('View Contact')",
         "a:has-text('View Number')",
+        # class-based
+        "button[class*='contact']",
+        "button[class*='view-number']",
+        "button[class*='show-mobile']",
+        ".view-contact-btn",
+        ".contact-reveal-btn",
+        ".show-number-btn",
         "[class*='view-contact']",
         "[class*='show-contact']",
         "[class*='contact-details'] button",
@@ -737,28 +738,18 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     for sel in contact_selectors:
         try:
             loc = page.locator(sel).first
-            count = await loc.count()
-            if count > 0:
-                logger.info("Found contact reveal element", selector=sel)
-                try:
-                    text = await loc.inner_text(timeout=1000)
-                    logger.info("Contact button text", text=text[:50])
-                except:
-                    pass
+            if await loc.count() > 0:
                 await loc.scroll_into_view_if_needed(timeout=2000)
                 await loc.click(timeout=4000)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(2500)
                 clicked_any = True
-                logger.info("Clicked contact reveal button via selector", selector=sel)
+                logger.info("Clicked contact reveal button", selector=sel)
                 break
-            else:
-                logger.debug("Selector not found", selector=sel)
-        except Exception as e:
-            logger.debug("Selector failed", selector=sel, error=str(e)[:100])
+        except Exception:
             continue
 
     if not clicked_any:
-        logger.warning("No contact reveal button found with CSS selectors, trying text-based")
+        logger.info("No contact reveal button found with CSS selectors, trying text-based")
 
     if not clicked_any:
         # Strategy 2: Try explicit contact reveal labels before generic interest buttons.
@@ -881,89 +872,129 @@ async def _wait_for_contact_signal(page: Page, timeout_ms: int = 6000) -> bool:
 
 
 async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
-    """Pull phone/name from tel: links, inputs, and visible detail text."""
+    """Pull phone/email/name from DOM - handles IndiaMART contact popup layout."""
     out: dict[str, str] = {}
     try:
         data = await page.evaluate(
             r"""() => {
+              const knownNav = new Set(['9716054356','9696969696','18002008300']);
               const phones = [];
+              const emails = [];
               const addPhone = (raw) => {
                 const d = (raw || '').replace(/\D/g, '');
-                if (d.length >= 10) phones.push(d.slice(-10));
+                if (d.length >= 10 && !knownNav.has(d.slice(-10))) {
+                  const p = d.slice(-10);
+                  if (/^[6-9]/.test(p)) phones.push(p);
+                }
               };
-              const textOf = (el) => [
-                el.textContent || '',
-                el.getAttribute('href') || '',
-                el.getAttribute('title') || '',
-                el.getAttribute('aria-label') || '',
-                el.getAttribute('data-phone') || '',
-                el.getAttribute('data-mobile') || '',
-                el.getAttribute('data-contact') || '',
-                el.getAttribute('value') || '',
-              ].join(' ');
-              // Try new IndiaMART selectors
-              const phoneSelectors = [
-                '[data-testid="buyer-phone"]',
-                '[data-testid="contact-phone"]',
-                '.buyer-phone',
-                '.contact-phone',
-                '[class*="phone"]',
-                '[class*="mobile"]',
-                '[class*="contact"]',
-              ].join(',');
-              document.querySelectorAll(phoneSelectors).forEach(el => {
-                addPhone(textOf(el));
+              const addEmail = (raw) => {
+                const m = (raw || '').match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i);
+                if (m) emails.push(m[0].toLowerCase());
+              };
+
+              // 1. tel: and mailto: links (most reliable)
+              document.querySelectorAll('a[href^="tel:"]').forEach(a => {
+                addPhone(a.getAttribute('href').replace('tel:', ''));
+              });
+              document.querySelectorAll('a[href^="mailto:"]').forEach(a => {
+                addEmail(a.getAttribute('href').replace('mailto:', '').split('?')[0]);
               });
 
-              // Try tel: links
-              document.querySelectorAll('a[href^="tel:"]').forEach(a => addPhone(a.href));
-
-              // Try inputs
-              document.querySelectorAll('input, textarea').forEach(inp => {
-                const v = (inp.value || '').trim();
-                if (/^\+?\d[\d\s-]{8,}$/.test(v)) addPhone(v);
+              // 2. data attributes on any element
+              document.querySelectorAll('[data-phone],[data-mobile],[data-contact],[data-tel]').forEach(el => {
+                addPhone(el.getAttribute('data-phone') || el.getAttribute('data-mobile') ||
+                         el.getAttribute('data-contact') || el.getAttribute('data-tel') || '');
+              });
+              document.querySelectorAll('[data-email],[data-mail]').forEach(el => {
+                addEmail(el.getAttribute('data-email') || el.getAttribute('data-mail') || '');
               });
 
-              // Look for phone patterns in visible text
-              const body = document.body.innerText || '';
-              const phoneRe = /(?:Mobile|Phone|Contact|Tel)[\s:]*([\+\d\s\-()]{10,})/gi;
-              let match;
-              while ((match = phoneRe.exec(body)) !== null) {
-                addPhone(match[1]);
-              }
-              const anyPhoneRe = /(?:\+91[\s-]?)?[6-9]\d{9}/g;
-              while ((match = anyPhoneRe.exec(body)) !== null) {
-                addPhone(match[0]);
-              }
-
-              // Try to find name from various patterns
-              let name = '';
-              const nameSelectors = [
-                '[data-testid="buyer-name"]', '[data-testid="contact-name"]',
-                '.buyer-name', '.contact-name', '.buyer-details h3', '.contact-details h3',
-                '[class*="buyer"] h2', '[class*="buyer"] h3',
-                '[class*="contact"] h2', '[class*="contact"] h3'
+              // 3. Specific CSS selectors for contact panel
+              const panelSels = [
+                '[data-testid="buyer-phone"],[data-testid="contact-phone"]',
+                '.buyer-phone,.contact-phone,.byr-phone,.mob-num,.phone-no',
+                '[class*="phone"],[class*="mobile"],[class*="mob"]',
+                '[data-testid="buyer-email"],[data-testid="contact-email"]',
+                '.buyer-email,.contact-email,.byr-email',
+                '[class*="email"]',
               ];
-              for (const sel of nameSelectors) {
+              panelSels.forEach(sel => {
+                document.querySelectorAll(sel).forEach(el => {
+                  const t = (el.textContent || el.innerText || '').trim();
+                  addPhone(t); addEmail(t);
+                });
+              });
+
+              // 4. inputs / textareas that contain phone/email
+              document.querySelectorAll('input[type="tel"],input[name*="phone"],input[name*="mobile"]').forEach(inp => {
+                addPhone(inp.value || '');
+              });
+              document.querySelectorAll('input[type="email"],input[name*="email"]').forEach(inp => {
+                addEmail(inp.value || '');
+              });
+
+              // 5. Scan visible popup/modal text for phone+email patterns
+              // IndiaMART contact popup is typically in a dialog, aside, or overlay div
+              const popupSels = [
+                '[role="dialog"]', '[class*="modal"]', '[class*="popup"]',
+                '[class*="overlay"]', '[class*="drawer"]',
+                '[class*="detail-panel"]', '[class*="byr-detail"]',
+                '[class*="inqry-detail"]', '[class*="contact-detail"]',
+                '[class*="buyer-info"]', 'aside',
+              ];
+              let panelText = '';
+              for (const sel of popupSels) {
                 const el = document.querySelector(sel);
                 if (el) {
-                  name = (el.textContent || el.innerText).trim();
-                  if (name && name.length > 2 && name.length < 60) break;
+                  const t = (el.innerText || '').trim();
+                  if (t.length > 20) { panelText = t; break; }
+                }
+              }
+              if (!panelText) panelText = document.body.innerText || '';
+
+              const anyPhoneRe = /(?:\+91[\s-]?)?[6-9]\d{9}/g;
+              let m;
+              while ((m = anyPhoneRe.exec(panelText)) !== null) addPhone(m[0]);
+              const emailRe = /[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi;
+              while ((m = emailRe.exec(panelText)) !== null) addEmail(m[0]);
+
+              // 6. Extract name: look for heading/bold text near top of popup
+              let name = '';
+              // Try data-testid selectors
+              for (const sel of [
+                '[data-testid="buyer-name"]','[data-testid="contact-name"]',
+                '.buyer-name','.contact-name','.byr-name',
+                '[class*="buyer-name"],[class*="contact-name"]',
+              ]) {
+                const el = document.querySelector(sel);
+                if (el) {
+                  const t = (el.textContent || el.innerText || '').trim();
+                  if (t && t.length > 1 && t.length < 80) { name = t; break; }
+                }
+              }
+              // Try first h1/h2/h3/h4/strong in popup
+              if (!name && panelText) {
+                const lines = panelText.split('\n').map(l => l.trim()).filter(Boolean);
+                const skipWords = /email|mobile|phone|contact|verified|last seen|member|enterprise|pvt|ltd|india|pradesh|gujarat|maharashtra|dashboard|leads|settings|logout|help|\d/i;
+                for (const line of lines.slice(0, 6)) {
+                  if (skipWords.test(line)) continue;
+                  if (line.length >= 2 && line.length <= 60 && /[A-Za-z]/.test(line)) {
+                    name = line; break;
+                  }
                 }
               }
 
-              // Regex fallback for name
-              if (!name) {
-                const nameRe = /(?:buyer\s*name|contact\s*person|contact\s*name|customer\s*name)\s*[:\-]\s*([A-Za-z][A-Za-z\s.]{2,60})/i;
-                const nm = body.match(nameRe);
-                if (nm) name = nm[1].trim();
-              }
-
-              return { phones: [...new Set(phones)], name: name };
+              return {
+                phones: [...new Set(phones)],
+                emails: [...new Set(emails)],
+                name: name,
+              };
             }"""
         )
         if data.get("phones"):
             out["buyer_phone"] = str(data["phones"][0])
+        if data.get("emails"):
+            out["buyer_email"] = str(data["emails"][0])
         if data.get("name"):
             out["buyer_name"] = str(data["name"])[:120]
     except Exception:
@@ -1127,17 +1158,59 @@ def _extract_product_title_from_panel(text: str) -> str:
     return ""
 
 
+def _extract_name_from_panel_top(panel_text: str) -> str:
+    """IndiaMART contact popup shows buyer name as first prominent line."""
+    lines = [ln.strip() for ln in panel_text.splitlines() if ln.strip()]
+    for line in lines[:8]:
+        # Skip lines that are clearly labels, locations, UI text, or very short
+        low = line.lower()
+        if any(m in low for m in _NAV_NAME_MARKERS):
+            continue
+        if any(m in low for m in ("email", "mobile", "phone", "contact", "verified",
+                                   "last seen", "member since", "enterprise", "pvt",
+                                   "ltd", "india", "pradesh", "gujarat", "maharashtra")):
+            continue
+        if _TIME_RE.search(line):
+            continue
+        if _LOCATION_RE.search(line) and len(line) < 60:
+            continue
+        if _PHONE_RE.search(line) or _EMAIL_RE.search(line):
+            continue
+        # Must look like a person's name: 2-4 words, capitalised, no digits
+        if len(line) < 2 or len(line) > 60 or re.search(r"\d", line):
+            continue
+        words = line.split()
+        if 1 <= len(words) <= 5 and re.search(r"[A-Za-z]", line):
+            return line[:80]
+    return ""
+
+
 def _apply_panel_text_to_lead(lead: dict[str, str], panel_text: str, block_text: str) -> None:
     combined = f"{block_text}\n{panel_text}"
+    # Extract phones from combined text
     phones = _PHONE_RE.findall(combined)
-    if phones:
-        lead["buyer_phone"] = phones[0].replace(" ", "").replace("-", "")
+    plausible_phones = [
+        p.replace(" ", "").replace("-", "")
+        for p in phones
+        if is_plausible_buyer_phone(p, block_text, panel_text)
+    ]
+    if plausible_phones and not lead.get("buyer_phone"):
+        lead["buyer_phone"] = plausible_phones[0]
+    elif phones and not lead.get("buyer_phone"):
+        # Fall back to first phone found if plausibility filter removed all
+        d = normalize_phone_digits(phones[0])
+        if d and d not in _KNOWN_NAV_PHONES:
+            lead["buyer_phone"] = d
+    # Extract email
     emails = _EMAIL_RE.findall(combined)
-    if emails:
+    if emails and not lead.get("buyer_email"):
         lead["buyer_email"] = emails[0]
-
+    # Extract name — try popup-top heuristic first, then regex patterns
     if not lead.get("buyer_name"):
-        lead["buyer_name"] = _parse_name_from_panel(panel_text)
+        name = _extract_name_from_panel_top(panel_text)
+        if not name:
+            name = _parse_name_from_panel(panel_text)
+        lead["buyer_name"] = name
 
 
 async def extract_buyer_details(
@@ -1201,84 +1274,30 @@ async def extract_buyer_details(
     dom_contact = await _scrape_contact_from_dom(page)
     if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
         lead["buyer_phone"] = dom_contact["buyer_phone"]
+    if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
+        lead["buyer_email"] = dom_contact["buyer_email"]
     if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
         lead["buyer_name"] = dom_contact["buyer_name"]
 
     if try_reveal_contact and not lead_has_buyer_contact(lead):
-        for _ in range(4):
+        for attempt in range(3):
             clicked_any = await reveal_indiamart_buyer_contact(page)
             if clicked_any:
-                await _wait_for_contact_signal(page, timeout_ms=7000)
-                panel_text = await _read_detail_panel_text(page)
-                _apply_panel_text_to_lead(lead, panel_text, block_text)
-                dom_contact = await _scrape_contact_from_dom(page)
-                if dom_contact.get("buyer_phone"):
-                    lead["buyer_phone"] = dom_contact["buyer_phone"]
-                if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
-                    lead["buyer_name"] = dom_contact["buyer_name"]
-                # Try new IndiaMART selectors after contact reveal
-                post_reveal_selectors = [
-                    ("[data-testid='buyer-name'], [data-testid='contact-name'], .buyer-name, .byr-name, .contact-name, [class*='buyer'] h3, [class*='contact'] h3", "buyer_name"),
-                    ("[data-testid='buyer-phone'], [data-testid='contact-phone'], a[href^='tel:'], .buyer-phone, .byr-phone, .contact-phone, [class*='phone'], .phone-no, [class*='mobile']", "buyer_phone"),
-                    ("[data-testid='buyer-email'], [data-testid='email'], a[href^='mailto:'], .buyer-email, .byr-email, .email", "buyer_email"),
-                ]
-                for sel, field in post_reveal_selectors:
-                    try:
-                        loc = page.locator(sel).first
-                        if await loc.count() > 0:
-                            val = (await loc.inner_text(timeout=3000)).strip()
-                            if field == "buyer_phone":
-                                digits = re.sub(r"\D", "", val)
-                                if len(digits) >= 10:
-                                    lead[field] = digits[-10:] if len(digits) > 10 else digits
-                            elif field == "buyer_email":
-                                if _EMAIL_RE.match(val):
-                                    lead[field] = val
-                            elif val and len(val) < 120:
-                                lead[field] = val
-                    except Exception:
-                        continue
-            else:
-                logger.warning("All selector strategies failed, trying JavaScript fallback")
-                # Fallback click pass inside probable details panel controls.
-                try:
-                    clicked = await page.evaluate(
-                        """() => {
-                          const panel = document.querySelector('[class*="detail"], [class*="inqry"], [class*="byr"]') || document.body;
-                          const want = /view|contact|mobile|phone|number|call|whatsapp|buyer/i;
-                          const deny = /close|cancel|back|share|login|sign in|filter|search|interested/i;
-                          let count = 0;
-                          let clickedElements = [];
-                          for (const el of panel.querySelectorAll('button, a, [role="button"], span, div')) {
-                            const t = (el.innerText || el.textContent || '').trim();
-                            if (!t || t.length < 3 || t.length > 60) continue;
-                            if (!want.test(t) || deny.test(t)) continue;
-                            const r = el.getBoundingClientRect();
-                            if (r.width < 2 || r.height < 2) continue;
-                            try {
-                              el.click();
-                              clickedElements.push(t.substring(0, 50));
-                              count++;
-                            } catch (e) {}
-                            if (count >= 4) break;
-                          }
-                          return {count: count, clicked: clickedElements, pageText: document.body.innerText.substring(0, 500)};
-                        }"""
-                    )
-                    logger.info("JavaScript fallback result", clicked_data=clicked)
-                    if clicked and clicked.get('count', 0) > 0:
-                        await page.wait_for_timeout(2500)
-                        await _wait_for_contact_signal(page, timeout_ms=7000)
-                        panel_text = await _read_detail_panel_text(page)
-                        _apply_panel_text_to_lead(lead, panel_text, block_text)
-                        dom_contact = await _scrape_contact_from_dom(page)
-                        if dom_contact.get("buyer_phone"):
-                            lead["buyer_phone"] = dom_contact["buyer_phone"]
-                        if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
-                            lead["buyer_name"] = dom_contact["buyer_name"]
-                except Exception:
-                    pass
+                await _wait_for_contact_signal(page, timeout_ms=8000)
+            # Re-scrape after reveal attempt regardless of click outcome
+            panel_text = await _read_detail_panel_text(page)
+            _apply_panel_text_to_lead(lead, panel_text, block_text)
+            dom_contact = await _scrape_contact_from_dom(page)
+            if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
+                lead["buyer_phone"] = dom_contact["buyer_phone"]
+            if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
+                lead["buyer_email"] = dom_contact["buyer_email"]
+            if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
+                lead["buyer_name"] = dom_contact["buyer_name"]
             if lead_has_buyer_contact(lead):
+                break
+            if not clicked_any:
+                logger.warning("Contact reveal button not found, attempt %d/3", attempt + 1)
                 break
 
     if not lead.get("message") and panel_text:
@@ -1296,4 +1315,181 @@ async def extract_buyer_details(
     if not lead.get("buyer_address"):
         lead["buyer_address"] = _parse_address_from_text(combined) or lead.get("buyer_location", "")
 
+    # ===== FALLBACK: Regex-based extraction (layout-independent) =====
+    # This catches phone/email even if IndiaMART changes their DOM structure
+    if not lead.get("buyer_phone") or not lead.get("buyer_email"):
+        fallback = await _regex_fallback_extract(page)
+        if fallback.get("phone") and not lead.get("buyer_phone"):
+            lead["buyer_phone"] = fallback["phone"]
+        if fallback.get("email") and not lead.get("buyer_email"):
+            lead["buyer_email"] = fallback["email"]
+        if fallback.get("name") and not lead.get("buyer_name"):
+            lead["buyer_name"] = fallback["name"]
+
     return sanitize_lead_contacts(lead, block_text, panel_text)
+
+
+async def _regex_fallback_extract(page: Page) -> dict[str, str]:
+    """
+    Layout-independent fallback: extract phone/email/name using pure regex on page text.
+    Works even if IndiaMART completely changes their DOM structure.
+    
+    Phone patterns:
+      - +91 followed by 10 digits (with optional spaces/dashes)
+      - 10 digits starting with 6-9 (Indian mobile)
+      - Numbers near "Mobile", "Phone", "Contact" labels
+    
+    Email patterns:
+      - Standard email format: word@domain.tld
+      - Near "Email" label
+    
+    Name patterns:
+      - Text after "Buyer Name:", "Contact Person:", etc.
+      - Capitalized words at start of contact section
+    """
+    result: dict[str, str] = {}
+    try:
+        # Get full visible text from page
+        text = await page.evaluate("() => document.body.innerText || ''")
+        if not text or len(text) < 20:
+            return result
+        
+        # Known nav/support numbers to exclude
+        nav_phones = {"9716054356", "9696969696", "18002008300", "9999999999"}
+        
+        # ===== PHONE EXTRACTION =====
+        # Priority: Indian mobile > Indian landline > International
+        
+        # 1. Indian Mobile patterns (most common for IndiaMART)
+        indian_mobile_patterns = [
+            # +91 prefix
+            r"\+91[\s\-]?([6-9]\d{9})",
+            r"\+91[\s\-]?([6-9]\d{4})[\s\-]?(\d{5})",
+            # Near labels
+            r"(?:mobile|phone|contact|tel|call)[\s:.\-]*\+?(?:91)?[\s\-]?([6-9]\d{9})",
+            # Standalone 10-digit (starts with 6-9)
+            r"(?<!\d)([6-9]\d{9})(?!\d)",
+            r"(?<!\d)([6-9]\d{4})[\s\-](\d{5})(?!\d)",
+        ]
+        
+        for pattern in indian_mobile_patterns:
+            matches = re.findall(pattern, text, re.I)
+            for match in matches:
+                digits = "".join(match) if isinstance(match, tuple) else match
+                digits = re.sub(r"\D", "", digits)
+                if len(digits) >= 10:
+                    phone = digits[-10:]
+                    if phone not in nav_phones and phone[0] in "6789":
+                        result["phone"] = phone
+                        break
+            if result.get("phone"):
+                break
+        
+        # 2. Indian Landline patterns (STD code + number)
+        # Format: 0XX-XXXXXXXX or 0XXX-XXXXXXX (total 11-12 digits with leading 0)
+        if not result.get("phone"):
+            landline_patterns = [
+                # Major cities: 011 (Delhi), 022 (Mumbai), 033 (Kolkata), 044 (Chennai), 080 (Bangalore)
+                r"(?:landline|office|tel|phone)[\s:.\-]*(0[1-9]\d{1,2})[\s\-]?(\d{6,8})",
+                # Standalone with STD code
+                r"(?<!\d)(0[1-9]\d{1,2})[\s\-](\d{6,8})(?!\d)",
+                # With parentheses: (022) 12345678
+                r"\(?(0[1-9]\d{1,2})\)?[\s\-]?(\d{6,8})",
+            ]
+            
+            for pattern in landline_patterns:
+                matches = re.findall(pattern, text, re.I)
+                for match in matches:
+                    if isinstance(match, tuple):
+                        std_code = match[0]
+                        number = match[1]
+                        full_number = std_code + number
+                    else:
+                        full_number = match
+                    digits = re.sub(r"\D", "", full_number)
+                    # Indian landline: 11-12 digits total (with leading 0)
+                    if 10 <= len(digits) <= 12 and digits.startswith("0"):
+                        if digits not in nav_phones:
+                            result["phone"] = digits
+                            break
+                if result.get("phone"):
+                    break
+        
+        # 3. International numbers (any country code)
+        # Format: +XX XXXXXXXXXX or +XXX XXXXXXXXX
+        if not result.get("phone"):
+            international_patterns = [
+                # +country_code followed by number (7-15 digits total is valid internationally)
+                r"\+(\d{1,4})[\s\-]?(\d[\d\s\-]{6,14})",
+                # Near labels with + prefix
+                r"(?:phone|mobile|contact|tel|call|whatsapp)[\s:.\-]*\+(\d{1,4})[\s\-]?(\d[\d\s\-]{6,14})",
+            ]
+            
+            for pattern in international_patterns:
+                matches = re.findall(pattern, text, re.I)
+                for match in matches:
+                    if isinstance(match, tuple):
+                        country_code = match[0]
+                        number = re.sub(r"\D", "", match[1])
+                        full_number = f"+{country_code}{number}"
+                    else:
+                        full_number = "+" + re.sub(r"\D", "", match)
+                    
+                    digits_only = re.sub(r"\D", "", full_number)
+                    # International: 8-15 digits (including country code)
+                    if 8 <= len(digits_only) <= 15:
+                        # Skip if it's actually an Indian number we already checked
+                        if not (digits_only.startswith("91") and len(digits_only) == 12):
+                            result["phone"] = full_number
+                            break
+                if result.get("phone"):
+                    break
+        
+        # ===== EMAIL EXTRACTION =====
+        email_patterns = [
+            # Near "Email" label
+            r"(?:email|e-mail|mail)[\s:.\-]*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+            # Standalone email
+            r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
+        ]
+        
+        skip_emails = {"support@indiamart", "help@indiamart", "info@indiamart", 
+                       "noreply@", "no-reply@", "donotreply@"}
+        
+        for pattern in email_patterns:
+            matches = re.findall(pattern, text, re.I)
+            for email in matches:
+                email_lower = email.lower()
+                if not any(skip in email_lower for skip in skip_emails):
+                    result["email"] = email_lower
+                    break
+            if result.get("email"):
+                break
+        
+        # ===== NAME EXTRACTION =====
+        name_patterns = [
+            # Explicit labels
+            r"(?:buyer\s*name|contact\s*person|contact\s*name|name)[\s:.\-]+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,3})",
+            # Name before company/location
+            r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\s*(?:,|\n|from|at|\|)",
+        ]
+        
+        skip_names = {"buy leads", "dashboard", "settings", "logout", "help", 
+                      "indiamart", "seller", "recent", "contact buyer", "view"}
+        
+        for pattern in name_patterns:
+            matches = re.findall(pattern, text, re.M)
+            for name in matches:
+                name = name.strip()
+                if len(name) >= 2 and len(name) <= 60:
+                    if not any(skip in name.lower() for skip in skip_names):
+                        if not re.search(r"\d", name):  # No digits in name
+                            result["name"] = name
+                            break
+            if result.get("name"):
+                break
+        
+    except Exception:
+        pass
+    
+    return result

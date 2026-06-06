@@ -617,6 +617,31 @@ async def run_local_login(
         except asyncio.TimeoutError:
             print("\n  Timeout! Saving session...")
 
+        # Auto-navigate to leads page and wait for feed to load (no manual step needed)
+        print("\n  Auto-navigating to Recent Buy Leads to verify login...")
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(2000)
+            # Wait up to 20s for time markers to appear
+            try:
+                await page.wait_for_function(
+                    r"""() => {
+                      const t = document.body.innerText || '';
+                      return /just\s+now|\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago/i.test(t);
+                    }""",
+                    timeout=20_000,
+                )
+                print("  Leads feed verified — time markers visible.")
+            except Exception:
+                # networkidle fallback
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
+                print("  Page loaded (time markers not visible yet — this is OK if you just logged in).")
+        except Exception as nav_exc:
+            print(f"  WARNING: Auto-navigation failed: {nav_exc}")
+
         final_url = page.url
         final_lower = final_url.lower()
         try:
@@ -637,23 +662,24 @@ async def run_local_login(
             and "sign in" in body_lower
             and not has_leads_feed
         )
-        login_ok = (
-            not any(p in final_lower for p in ("login", "signin", "sign-in"))
-            and not on_marketing
-            and has_leads_feed
+        # Accept session as valid if on seller domain, even without time markers
+        on_seller_domain = "seller.indiamart.com" in final_lower and not any(
+            p in final_lower for p in ("login", "signin", "sign-in")
         )
+        login_ok = on_seller_domain and not on_marketing
         if on_marketing:
             print(
-                "\n  ERROR: Still on public IndiaMART page. Open Recent Buy Leads, "
-                "see buyer rows, then press ENTER."
+                "\n  ERROR: Still on public IndiaMART page. Please log in to IndiaMART "
+                "seller account and run the script again."
             )
         elif not login_ok:
             print(
-                "\n  WARNING: Buyer rows were not visible. Open Recent Buy Leads until "
-                "you can see rows with 'mins ago' / 'hrs ago', then upload again."
+                "\n  WARNING: Could not confirm login. Make sure you are logged in to "
+                "IndiaMART seller account before running this script."
             )
         else:
-            print(f"\n  Login verified (leads feed visible). Page: {final_url}")
+            status = "leads feed visible" if has_leads_feed else "on seller dashboard"
+            print(f"\n  Login verified ({status}). Page: {final_url}")
 
         session_meta = {
             "profile_name": profile_name,
