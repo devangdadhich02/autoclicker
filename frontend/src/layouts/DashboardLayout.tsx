@@ -1,7 +1,7 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Briefcase, ScrollText, Users, Settings,
-  LogOut, Zap, Cookie,
+  LogOut, Zap, Cookie, Contact,
 } from 'lucide-react'
 import { useAuthStore } from '../store/authStore'
 import toast from 'react-hot-toast'
@@ -10,6 +10,7 @@ const navItems = [
   { to: '/dashboard', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/dashboard/session', label: 'Seller Session', icon: Cookie },
   { to: '/dashboard/jobs', label: 'Automation Jobs', icon: Briefcase },
+  { to: '/dashboard/leads', label: 'Captured Leads', icon: Contact },
   { to: '/dashboard/logs', label: 'Event Logs', icon: ScrollText },
   { to: '/dashboard/users', label: 'Users', icon: Users, adminOnly: true },
   { to: '/dashboard/settings', label: 'Settings', icon: Settings },

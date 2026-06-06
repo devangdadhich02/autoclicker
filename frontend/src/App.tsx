@@ -11,6 +11,7 @@ import LogsPage from './pages/LogsPage'
 import UsersPage from './pages/UsersPage'
 import SettingsPage from './pages/SettingsPage'
 import SessionPage from './pages/SessionPage'
+import LeadsPage from './pages/LeadsPage'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
@@ -47,6 +48,7 @@ export default function App() {
         <Route index element={<DashboardHome />} />
         <Route path="jobs" element={<JobsPage />} />
         <Route path="jobs/:jobId" element={<JobDetailPage />} />
+        <Route path="leads" element={<LeadsPage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="session" element={<SessionPage />} />
         <Route
