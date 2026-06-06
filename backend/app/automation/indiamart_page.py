@@ -286,13 +286,13 @@ async def open_buy_leads_main_panel(page: Page) -> bool:
         clicked = await page.evaluate(
             """() => {
               const skip = /sign in|help|logout|products|photos|invoice|settings|tally/i;
-              const want = /buy\\s*leads?/i;
+              const want = /buy\\s*leads?|lead\\s*manager|buyleads/i;
               const nodes = [...document.querySelectorAll('a, button, span, div, li')];
               for (const el of nodes) {
                 const t = (el.innerText || '').trim();
                 if (!t || t.length > 36 || skip.test(t)) continue;
                 const compact = t.replace(/\\s+/g, '').toLowerCase();
-                if (!want.test(t) && !compact.startsWith('buyleads')) continue;
+                if (!want.test(t) && !compact.startsWith('buyleads') && !compact.startsWith('leadmanager')) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width < 8 || r.height < 8) continue;
                 // React-friendly click sequence
@@ -325,6 +325,13 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
     # Strategy 0: Try new IndiaMART layout selectors first (2024-2025)
     try:
         new_selectors = [
+            # Lead Manager (visible in logs)
+            "a:has-text('Lead Manager')",
+            "[class*='LeadManager']",
+            "li:has-text('Lead Manager') a",
+            # BuyLeads links
+            "a:has-text('BuyLeads')",
+            "a:has-text('Buy Leads')",
             "[data-testid='buy-leads-link']",
             "[data-testid='recent-buy-leads']",
             "a[href*='pref=recent']",
@@ -334,7 +341,6 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
             "[class*='buy-leads']",
             "nav a:has-text('Buy Leads')",
             "aside a:has-text('Buy Leads')",
-            "sidebar a:has-text('Buy Leads')",
             "li:has-text('Buy Leads') a",
         ]
         for sel in new_selectors:
@@ -566,21 +572,46 @@ async def ensure_bltxn_leads_page(
         )
 
         if nav_only and attempt < 2:
-            logger.warning("SPA stuck on nav-only view, forcing hard reload")
+            logger.warning("SPA stuck on nav-only view, trying sidebar click first")
+            
+            # First try: Click sidebar "Buy Leads" / "Lead Manager" link to trigger SPA
+            sidebar_clicked = await open_buy_leads_main_panel(page)
+            logger.info(f"Sidebar Buy Leads click result: {sidebar_clicked}")
+            await beat()
+            
+            if sidebar_clicked:
+                # Wait for SPA content to load after sidebar click
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
+                
+                # Check if leads are now visible
+                body = await read_indiamart_page_text(page, 4_000)
+                has_time_ago = bool(_TIME_AGO_RE.search(body))
+                logger.info(f"After sidebar click - has_time_ago: {has_time_ago}, body_length: {len(body)}")
+                
+                if has_time_ago or len(body) > 2000:
+                    # SPA loaded successfully
+                    await scroll_lead_list(page)
+                    break
+            
+            # Fallback: Hard reload if sidebar click didn't work
+            logger.warning("Sidebar click didn't load content, forcing hard reload")
             try:
-                # Hard reload bypasses SPA cache
                 await page.evaluate("() => { location.reload(true); }")
                 await page.wait_for_timeout(4000)
                 await beat()
             except Exception as e:
                 logger.error(f"Hard reload failed: {e}")
+            
             body = await read_indiamart_page_text(page, 4_000)
             has_time_ago = bool(_TIME_AGO_RE.search(body))
             logger.info(f"After hard reload - has_time_ago: {has_time_ago}")
 
             if not is_indiamart_marketing_landing(body):
                 logger.info("Not on marketing landing, assuming logged in")
-                # Continue retry loop to try navigation again
                 continue
 
         # If we have time markers, we're done
