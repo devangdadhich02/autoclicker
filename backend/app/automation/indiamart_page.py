@@ -236,21 +236,66 @@ async def scroll_lead_list(page: Page) -> None:
     try:
         await page.evaluate(
             """async () => {
-              const list = document.querySelector('#leadList, .byr-inqry-list, [class*="bltxn"]');
-              if (list && list.scrollHeight > list.clientHeight + 40) {
-                for (let i = 0; i < 6; i++) {
+              // Try multiple container selectors for lead list
+              const listSelectors = [
+                '#leadList', '.byr-inqry-list', '[class*="bltxn"]',
+                '[class*="lead-list"]', '[class*="inquiry-list"]',
+                '.msg-list', 'main', '[role="main"]'
+              ];
+              
+              let list = null;
+              for (const sel of listSelectors) {
+                const el = document.querySelector(sel);
+                if (el && el.scrollHeight > el.clientHeight + 40) {
+                  list = el;
+                  break;
+                }
+              }
+              
+              // Scroll the container if found
+              if (list) {
+                for (let i = 0; i < 10; i++) {
                   list.scrollTop = list.scrollHeight;
-                  await new Promise(r => setTimeout(r, 500));
+                  await new Promise(r => setTimeout(r, 600));
                 }
                 list.scrollTop = 0;
+                await new Promise(r => setTimeout(r, 300));
               }
-              for (let i = 0; i < 8; i++) {
-                window.scrollBy(0, Math.max(400, window.innerHeight * 0.55));
-                await new Promise(r => setTimeout(r, 550));
+              
+              // Also scroll the window (for different layouts)
+              for (let i = 0; i < 12; i++) {
+                window.scrollBy(0, Math.max(500, window.innerHeight * 0.6));
+                await new Promise(r => setTimeout(r, 500));
               }
+              
+              // Click "Load More" or "Show More" buttons if present
+              const loadMoreSelectors = [
+                'button:has-text("Load More")', 'button:has-text("Show More")',
+                'a:has-text("Load More")', '[class*="load-more"]', '[class*="show-more"]'
+              ];
+              for (const sel of loadMoreSelectors) {
+                try {
+                  const btn = document.querySelector(sel);
+                  if (btn) { btn.click(); await new Promise(r => setTimeout(r, 1500)); }
+                } catch(e) {}
+              }
+              
+              // Scroll back to top
               window.scrollTo(0, 0);
+              if (list) list.scrollTop = 0;
             }"""
         )
+    except Exception:
+        pass
+    
+    # Also try Playwright-based load more click
+    try:
+        for sel in ["button:has-text('Load More')", "button:has-text('Show More')", "[class*='load-more']"]:
+            loc = page.locator(sel).first
+            if await loc.count() > 0:
+                await loc.click(timeout=3000)
+                await page.wait_for_timeout(1500)
+                break
     except Exception:
         pass
 
