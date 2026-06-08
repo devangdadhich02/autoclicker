@@ -496,7 +496,7 @@ def lead_record_is_complete(block_text: str, lead: dict[str, str]) -> bool:
     return has_time and has_addr and has_product
 
 
-async def _wait_for_lead_feed(page: Page, timeout_ms: int = 25_000) -> bool:
+async def _wait_for_lead_feed(page: Page, timeout_ms: int = 6_000) -> bool:
     """Wait until recent-leads feed shows at least one time marker."""
     try:
         await page.wait_for_function(
@@ -553,7 +553,7 @@ def _blocks_from_body_text(body: str, max_blocks: int = 40) -> list[BuyerLeadBlo
     return blocks
 
 
-async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 100) -> list[BuyerLeadBlock]:
+async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[BuyerLeadBlock]:
     await _wait_for_lead_feed(page)
     await scroll_lead_list(page, aggressive=True)
 
@@ -678,7 +678,7 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 100) -> list[B
           if (r.width < 4 || r.height < 4) continue;
           try {
             el.click();
-            await sleep(1200);
+            await sleep(600);
             return true;
           } catch (e) {}
         }
@@ -687,19 +687,19 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 100) -> list[B
 
       scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
       window.scrollTo(0, 0);
-      await sleep(500);
+      await sleep(200);
 
       let stagnant = 0;
-      const maxSteps = 36;
+      const maxSteps = 12;
       for (let step = 0; step < maxSteps && out.length < maxBlocks * 4; step += 1) {
         sampleVisibleRows(`scan-${step}`);
-        if (step > 0 && step % 8 === 0) await clickLoadMore();
+        if (step > 0 && step % 6 === 0) await clickLoadMore();
 
         let moved = false;
         for (const root of scrollRoots.slice(0, 6)) {
           try {
             const before = root.scrollTop || 0;
-            const delta = Math.max(360, Math.floor((root.clientHeight || window.innerHeight) * 0.72));
+            const delta = Math.max(520, Math.floor((root.clientHeight || window.innerHeight) * 0.9));
             root.scrollTop = Math.min(root.scrollHeight, before + delta);
             if ((root.scrollTop || 0) > before + 4) moved = true;
           } catch (e) {}
@@ -708,7 +708,7 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 100) -> list[B
         window.scrollBy(0, Math.max(420, Math.floor(window.innerHeight * 0.72)));
         if ((window.scrollY || pageYOffset || 0) > beforeWindow + 4) moved = true;
 
-        await sleep(650);
+        await sleep(250);
         stagnant = moved ? 0 : stagnant + 1;
         if (stagnant >= 3) break;
       }
@@ -1391,6 +1391,39 @@ def _extract_product_title_from_panel(text: str) -> str:
     return ""
 
 
+def _product_context_words(text: str) -> list[str]:
+    words = [
+        w
+        for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(w) >= 3 and w not in _GENERIC_MATCH_WORDS
+    ]
+    out: list[str] = []
+    for word in words:
+        if word not in out:
+            out.append(word)
+    return out
+
+
+def _panel_matches_block(panel_text: str, block_text: str) -> bool:
+    """True when the open detail/contact panel still appears to be the clicked row."""
+    if not block_text:
+        return True
+    panel = (panel_text or "").lower()
+    if not panel or len(panel) < 40:
+        return False
+
+    title = _lead_title_for_click(block_text)
+    title_words = _product_context_words(title)
+    if not title_words:
+        title_words = _product_context_words(lead_match_text(block_text))
+    if not title_words:
+        return True
+
+    hits = [word for word in title_words if re.search(rf"\b{re.escape(word)}\b", panel)]
+    needed = min(len(title_words), 2)
+    return len(hits) >= needed
+
+
 def _extract_name_from_panel_top(panel_text: str) -> str:
     """IndiaMART contact popup shows buyer name as first prominent line."""
     lines = [ln.strip() for ln in panel_text.splitlines() if ln.strip()]
@@ -1463,10 +1496,19 @@ async def extract_buyer_details(
             lead["buyer_address"] = lead.get("buyer_location", "")
 
     panel_text = await _read_detail_panel_text(page)
-    _apply_panel_text_to_lead(lead, panel_text, block_text)
+    panel_matches_block = _panel_matches_block(panel_text, block_text)
+    if panel_matches_block:
+        _apply_panel_text_to_lead(lead, panel_text, block_text)
+    elif block_text:
+        logger.warning(
+            "Detail panel does not match clicked lead; ignoring panel contact text "
+            "block_title=%r panel_preview=%r",
+            _lead_title_for_click(block_text),
+            panel_text[:180],
+        )
 
     # Extract better product title from panel text if available
-    if panel_text and len(panel_text) > 50:
+    if panel_matches_block and panel_text and len(panel_text) > 50:
         # Try to find product title in panel (often in first few lines or after "Product:" label)
         panel_title = _extract_product_title_from_panel(panel_text)
         if panel_title and len(panel_title) > len(lead.get("product_title", "")):
@@ -1485,62 +1527,72 @@ async def extract_buyer_details(
         ("[data-testid='buyer-email'], [data-testid='email'], a[href^='mailto:'], .buyer-email, .byr-email, .email", "buyer_email"),
     ]
 
-    for sel, field in selector_patterns:
-        try:
-            loc = page.locator(sel).first
-            if await loc.count() > 0:
-                val = (await loc.inner_text(timeout=2000)).strip()
-                if val and len(val) < 500:
-                    if field == "buyer_phone":
-                        digits = re.sub(r"\D", "", val)
-                        if len(digits) >= 10:
-                            lead[field] = digits[-10:] if len(digits) > 10 else digits
-                    elif field == "buyer_email":
-                        # Validate email format
-                        if _EMAIL_RE.match(val):
+    if panel_matches_block:
+        for sel, field in selector_patterns:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    val = (await loc.inner_text(timeout=2000)).strip()
+                    if val and len(val) < 500:
+                        if field == "buyer_phone":
+                            digits = re.sub(r"\D", "", val)
+                            if len(digits) >= 10:
+                                lead[field] = digits[-10:] if len(digits) > 10 else digits
+                        elif field == "buyer_email":
+                            # Validate email format
+                            if _EMAIL_RE.match(val):
+                                lead[field] = val
+                        else:
                             lead[field] = val
-                    else:
-                        lead[field] = val
-        except Exception:
-            continue
+            except Exception:
+                continue
 
-    dom_contact = await _scrape_contact_from_dom(page)
-    if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
-        lead["buyer_phone"] = dom_contact["buyer_phone"]
-    if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
-        lead["buyer_email"] = dom_contact["buyer_email"]
-    if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
-        lead["buyer_name"] = dom_contact["buyer_name"]
+        dom_contact = await _scrape_contact_from_dom(page)
+        if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
+            lead["buyer_phone"] = dom_contact["buyer_phone"]
+        if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
+            lead["buyer_email"] = dom_contact["buyer_email"]
+        if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
+            lead["buyer_name"] = dom_contact["buyer_name"]
 
     if try_reveal_contact and not lead_has_buyer_contact(lead):
-        for attempt in range(3):
+        for attempt in range(2):
             clicked_any = await reveal_indiamart_buyer_contact(page)
             if clicked_any:
-                await _wait_for_contact_signal(page, timeout_ms=8000)
+                await _wait_for_contact_signal(page, timeout_ms=4000)
             # Re-scrape after reveal attempt regardless of click outcome
             panel_text = await _read_detail_panel_text(page)
-            _apply_panel_text_to_lead(lead, panel_text, block_text)
-            dom_contact = await _scrape_contact_from_dom(page)
-            if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
-                lead["buyer_phone"] = dom_contact["buyer_phone"]
-            if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
-                lead["buyer_email"] = dom_contact["buyer_email"]
-            if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
-                lead["buyer_name"] = dom_contact["buyer_name"]
+            panel_matches_block = _panel_matches_block(panel_text, block_text)
+            if panel_matches_block:
+                _apply_panel_text_to_lead(lead, panel_text, block_text)
+                dom_contact = await _scrape_contact_from_dom(page)
+                if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
+                    lead["buyer_phone"] = dom_contact["buyer_phone"]
+                if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
+                    lead["buyer_email"] = dom_contact["buyer_email"]
+                if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
+                    lead["buyer_name"] = dom_contact["buyer_name"]
+            else:
+                logger.warning(
+                    "Contact reveal panel mismatch; keeping lead partial "
+                    "block_title=%r panel_preview=%r",
+                    _lead_title_for_click(block_text),
+                    panel_text[:180],
+                )
             if lead_has_buyer_contact(lead):
                 break
             if not clicked_any:
-                logger.warning("Contact reveal button not found, attempt %d/3", attempt + 1)
+                logger.warning("Contact reveal button not found, attempt %d/2", attempt + 1)
                 break
 
-    if not lead.get("message") and panel_text:
+    if panel_matches_block and not lead.get("message") and panel_text:
         for line in panel_text.splitlines():
             line = line.strip()
             if len(line) > 25 and "interested" not in line.lower():
                 lead["message"] = line[:500]
                 break
 
-    combined = f"{block_text}\n{panel_text}"
+    combined = f"{block_text}\n{panel_text if panel_matches_block else ''}"
     if not lead.get("buyer_location"):
         loc = _CITY_STATE_RE.search(combined)
         if loc:
@@ -1550,8 +1602,8 @@ async def extract_buyer_details(
 
     # ===== FALLBACK: Regex-based extraction (layout-independent) =====
     # This catches phone/email even if IndiaMART changes their DOM structure
-    if not lead.get("buyer_phone") or not lead.get("buyer_email"):
-        fallback = await _regex_fallback_extract(page)
+    if panel_matches_block and (not lead.get("buyer_phone") or not lead.get("buyer_email")):
+        fallback = await _regex_fallback_extract(page, panel_text)
         if fallback.get("phone") and not lead.get("buyer_phone"):
             lead["buyer_phone"] = fallback["phone"]
         if fallback.get("email") and not lead.get("buyer_email"):
@@ -1562,7 +1614,7 @@ async def extract_buyer_details(
     return sanitize_lead_contacts(lead, block_text, panel_text)
 
 
-async def _regex_fallback_extract(page: Page) -> dict[str, str]:
+async def _regex_fallback_extract(page: Page, text: str | None = None) -> dict[str, str]:
     """
     Layout-independent fallback: extract phone/email/name using pure regex on page text.
     Works even if IndiaMART completely changes their DOM structure.
@@ -1582,8 +1634,10 @@ async def _regex_fallback_extract(page: Page) -> dict[str, str]:
     """
     result: dict[str, str] = {}
     try:
-        # Get full visible text from page
-        text = await page.evaluate("() => document.body.innerText || ''")
+        # Prefer caller-provided detail panel text. Full-page fallback can pick stale
+        # phone numbers from the shell or an old detail panel.
+        if text is None:
+            text = await page.evaluate("() => document.body.innerText || ''")
         if not text or len(text) < 20:
             return result
         

@@ -312,8 +312,8 @@ async def scroll_lead_list(page: Page, aggressive: bool = False) -> None:
     Args:
         aggressive: If True, scroll more extensively to load all possible leads.
     """
-    scroll_iterations = 25 if aggressive else 12
-    container_iterations = 20 if aggressive else 10
+    scroll_iterations = 8 if aggressive else 5
+    container_iterations = 6 if aggressive else 4
     
     try:
         await page.evaluate(
@@ -342,7 +342,7 @@ async def scroll_lead_list(page: Page, aggressive: bool = False) -> None:
                 let sameHeightCount = 0;
                 for (let i = 0; i < containerIter; i++) {
                   list.scrollTop = list.scrollHeight;
-                  await new Promise(r => setTimeout(r, 700));
+                  await new Promise(r => setTimeout(r, 250));
                   
                   // Check if new content loaded
                   if (list.scrollHeight === prevHeight) {
@@ -362,7 +362,7 @@ async def scroll_lead_list(page: Page, aggressive: bool = False) -> None:
               for (let i = 0; i < scrollIter; i++) {
                 const beforeY = window.scrollY || window.pageYOffset || 0;
                 window.scrollBy(0, Math.max(600, window.innerHeight * 0.7));
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 250));
 
                 const afterY = window.scrollY || window.pageYOffset || 0;
                 if (afterY <= beforeY + 4) {
@@ -797,14 +797,14 @@ async def _try_bltxn_route_variants(
         seen.add(url)
         unique_candidates.append(url)
 
-    for idx, url in enumerate(unique_candidates[:12], start=1):
+    for idx, url in enumerate(unique_candidates[:3], start=1):
         try:
             logger.info("Trying IndiaMART route variant attempt=%s url=%s", idx, url)
-            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_timeout(3500)
+            await page.goto(url, wait_until="domcontentloaded", timeout=12_000)
+            await page.wait_for_timeout(1000)
             await heartbeat()
             try:
-                await page.wait_for_load_state("networkidle", timeout=8_000)
+                await page.wait_for_load_state("networkidle", timeout=3_000)
             except Exception:
                 pass
             if await _page_has_time_marker(page):
@@ -818,7 +818,7 @@ async def _try_bltxn_route_variants(
                 url,
             )
             if clicked:
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(1000)
                 if await _page_has_time_marker(page):
                     logger.info(
                         "IndiaMART tab loaded buyer rows label=%s url=%s",
@@ -867,14 +867,14 @@ async def ensure_bltxn_leads_page(
     if "bltxn" in fallback_lower and not _is_non_recent_buy_leads_url(fallback_lower):
         target = fallback_url
 
-    for attempt in range(3):
+    for attempt in range(2):
         await beat()
-        logger.info(f"ensure_bltxn_leads_page attempt {attempt + 1}/3, target={target}")
+        logger.info(f"ensure_bltxn_leads_page attempt {attempt + 1}/2, target={target}")
 
         # Navigate directly to recent leads URL
         try:
-            await page.goto(target, wait_until="domcontentloaded", timeout=35_000)
-            await page.wait_for_timeout(2000)
+            await page.goto(target, wait_until="domcontentloaded", timeout=15_000)
+            await page.wait_for_timeout(800)
             await beat()
         except Exception as e:
             logger.warning(f"Navigation failed: {e}")
@@ -885,15 +885,15 @@ async def ensure_bltxn_leads_page(
         # Fix: if landed on relevant/suggested feed, force Recent.
         if _is_non_recent_buy_leads_url(current_url):
             try:
-                await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-                await page.wait_for_timeout(1500)
+                await page.goto(target, wait_until="domcontentloaded", timeout=12_000)
+                await page.wait_for_timeout(800)
                 await beat()
             except Exception:
                 pass
 
         # Wait for network calls to settle (SPA data fetch)
         try:
-            await page.wait_for_load_state("networkidle", timeout=15_000)
+            await page.wait_for_load_state("networkidle", timeout=5_000)
         except Exception:
             pass
         await beat()
@@ -910,7 +910,7 @@ async def ensure_bltxn_leads_page(
                   const t = document.body.innerText || '';
                   return /just\\s+now|\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago/i.test(t);
                 }""",
-                timeout=12_000,
+                timeout=4_000,
             )
             logger.info("Time markers found in DOM")
             await beat()
@@ -935,7 +935,7 @@ async def ensure_bltxn_leads_page(
             and "dashboard" in body.lower()
         )
 
-        if nav_only and attempt < 2:
+        if nav_only and attempt < 1:
             logger.warning("SPA stuck on nav-only view, trying sidebar click first")
             await _log_nav_shell_diagnostics(page, f"nav_only_attempt_{attempt + 1}")
             
@@ -957,7 +957,7 @@ async def ensure_bltxn_leads_page(
                 has_time_ago = bool(_TIME_AGO_RE.search(body))
                 logger.info(f"After sidebar click - has_time_ago: {has_time_ago}, body_length: {len(body)}")
                 
-                if has_time_ago or len(body) > 2000:
+                if has_time_ago:
                     # SPA loaded successfully
                     await scroll_lead_list(page)
                     break
@@ -971,7 +971,7 @@ async def ensure_bltxn_leads_page(
             logger.warning("Sidebar click didn't load content, forcing hard reload")
             try:
                 await page.evaluate("() => { location.reload(true); }")
-                await page.wait_for_timeout(4000)
+                await page.wait_for_timeout(1500)
                 await beat()
             except Exception as e:
                 logger.error(f"Hard reload failed: {e}")
@@ -991,20 +991,20 @@ async def ensure_bltxn_leads_page(
 
         if not is_indiamart_marketing_landing(body):
             logger.info("Not on marketing landing, assuming logged in")
-            if attempt < 2:
+            if attempt < 1:
                 continue
             break
 
         logger.warning(f"Marketing landing detected on attempt {attempt + 1}")
-        if attempt < 2:
+        if attempt < 1:
             await asyncio.sleep(3)
 
     final_url = (page.url or "").lower()
     if _is_non_recent_buy_leads_url(final_url):
         logger.info("Final URL is not Recent, forcing recent before returning")
         try:
-            await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_timeout(1500)
+            await page.goto(target, wait_until="domcontentloaded", timeout=12_000)
+            await page.wait_for_timeout(800)
             await beat()
         except Exception:
             pass

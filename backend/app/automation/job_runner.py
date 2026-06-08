@@ -29,7 +29,6 @@ from app.automation.indiamart_page import (
     is_indiamart_login_url,
     is_indiamart_marketing_landing,
     is_indiamart_seller_url,
-    open_first_lead_card,
     read_indiamart_page_text,
     scroll_lead_list,
     seller_session_is_authenticated,
@@ -327,13 +326,12 @@ class JobRunner:
                     url=page.url,
                 )
                 return
-        blocks = await collect_buyer_lead_blocks(page)
+        blocks = await collect_buyer_lead_blocks(page, max_blocks=25)
         if not blocks:
             # Single consolidated re-navigation attempt
             leads_url = _indiamart_recent_leads_url(job.target_url)
             await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
-            await open_first_lead_card(page)
-            blocks = await collect_buyer_lead_blocks(page)
+            blocks = await collect_buyer_lead_blocks(page, max_blocks=25)
         if not blocks:
             diag = ""
             snippet = ""

@@ -4,6 +4,7 @@ from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
     _blocks_from_body_text,
     _lead_title_for_click,
+    _panel_matches_block,
     _parse_address_from_text,
     is_buyer_inquiry_block,
     is_plausible_buyer_phone,
@@ -219,6 +220,35 @@ def test_rejects_indiamart_similar_leads_url_as_recent_feed():
     assert not _is_non_recent_buy_leads_url(
         "https://seller.indiamart.com/bltxn/?pref=recent"
     )
+
+
+def test_rejects_stale_detail_panel_for_different_lead_title():
+    block = (
+        "Laser Marking System\n"
+        "Jhunjhunu, Rajasthan\n"
+        "11 mins ago\n"
+        "Category: Laser Marking System\n"
+        "Requirement Type: Business Use"
+    )
+    stale_panel = (
+        "Co2 Laser Engraving Machine\n"
+        "Saudi Arabia, Engraving Machines\n"
+        "Phone 9313310116\n"
+        "NC-Scriber/Lettering Machine and Drafting Aid"
+    )
+    assert not _panel_matches_block(stale_panel, block)
+
+
+def test_accepts_matching_detail_panel_for_clicked_lead_title():
+    block = (
+        "Laser Marking Machine\n"
+        "Gurugram, Haryana\n"
+        "2 hrs ago\n"
+        "Category: Laser Marking Machine\n"
+        "Power: 50 W"
+    )
+    panel = "Laser Marking Machine\nGurugram, Haryana\nPhone 9876543210"
+    assert _panel_matches_block(panel, block)
 
 
 def test_accepts_just_now_feed_row():
