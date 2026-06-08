@@ -665,9 +665,17 @@ async def _log_nav_shell_diagnostics(page: Page, label: str) -> None:
               };
             }"""
         )
-        logger.info("IndiaMART nav-shell diagnostics", label=label, diagnostic=data)
+        logger.info(
+            "IndiaMART nav-shell diagnostics label=%s diagnostic=%s",
+            label,
+            json.dumps(data, ensure_ascii=False)[:4_000],
+        )
     except Exception as exc:
-        logger.info("IndiaMART nav-shell diagnostics failed", label=label, error=str(exc))
+        logger.info(
+            "IndiaMART nav-shell diagnostics failed label=%s error=%s",
+            label,
+            exc,
+        )
 
 
 async def _try_bltxn_route_variants(
@@ -713,7 +721,7 @@ async def _try_bltxn_route_variants(
 
     for idx, url in enumerate(unique_candidates[:12], start=1):
         try:
-            logger.info("Trying IndiaMART route variant", attempt=idx, url=url)
+            logger.info("Trying IndiaMART route variant attempt=%s url=%s", idx, url)
             await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(3500)
             await heartbeat()
@@ -722,23 +730,23 @@ async def _try_bltxn_route_variants(
             except Exception:
                 pass
             if await _page_has_time_marker(page):
-                logger.info("IndiaMART route variant loaded buyer rows", url=url)
+                logger.info("IndiaMART route variant loaded buyer rows url=%s", url)
                 return True
             clicked = await click_recent_buy_leads_tab(page)
             if clicked:
                 await page.wait_for_timeout(2500)
                 if await _page_has_time_marker(page):
-                    logger.info("IndiaMART recent tab loaded buyer rows", url=url)
+                    logger.info("IndiaMART recent tab loaded buyer rows url=%s", url)
                     return True
             body = await read_indiamart_page_text(page, 2_000)
             logger.info(
-                "IndiaMART route variant still has no buyer rows",
-                url=url,
-                body_length=len(body),
-                has_time=bool(_TIME_AGO_RE.search(body)),
+                "IndiaMART route variant still has no buyer rows url=%s body_length=%s has_time=%s",
+                url,
+                len(body),
+                bool(_TIME_AGO_RE.search(body)),
             )
         except Exception as exc:
-            logger.warning("IndiaMART route variant failed", url=url, error=str(exc))
+            logger.warning("IndiaMART route variant failed url=%s error=%s", url, exc)
 
     await _log_nav_shell_diagnostics(page, "after_route_variants")
     return False
