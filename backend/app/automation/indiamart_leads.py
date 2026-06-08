@@ -134,6 +134,26 @@ _LOW_VALUE_LEAD_LINES = frozenset(
         "category",
     }
 )
+_BAD_BUYER_NAMES = frozenset(
+    {
+        "indiamart",
+        "buy with indiamart",
+        "hi tushar",
+        "dashboard",
+        "profile",
+    }
+)
+_BAD_PRODUCT_TITLES = frozenset(
+    {
+        "indiamart",
+        "buy with indiamart",
+        "buy leads",
+        "buyleads",
+        "lead manager",
+        "dashboard",
+        "profile",
+    }
+)
 
 
 @dataclass
@@ -324,12 +344,38 @@ def sanitize_buyer_name(name: str) -> str:
         if not line or len(line) > 80:
             continue
         low = line.lower()
+        if low in _BAD_BUYER_NAMES:
+            continue
         if any(m in low for m in _NAV_NAME_MARKERS):
             continue
         if low in ("business use", "probable requirement type", "sold out!"):
             continue
         kept.append(line)
     return " ".join(kept)[:120].strip()
+
+
+def _is_bad_product_title(title: str) -> bool:
+    low = re.sub(r"\s+", " ", (title or "").strip().lower())
+    if not low:
+        return True
+    if low in _BAD_PRODUCT_TITLES:
+        return True
+    if any(marker in low for marker in ("seller dashboard", "buy with indiamart")):
+        return True
+    return False
+
+
+def sanitize_product_title(title: str, block_text: str = "") -> str:
+    """Prefer the matched feed-card title over nav/header text from the page shell."""
+    candidate = re.sub(r"\s+", " ", (title or "").strip())
+    candidate = re.sub(r"^category\s*:\s*", "", candidate, flags=re.IGNORECASE)
+    if candidate and not _is_bad_product_title(candidate):
+        return candidate[:200]
+    fallback = _lead_title_for_click(block_text)
+    fallback = re.sub(r"^category\s*:\s*", "", fallback, flags=re.IGNORECASE)
+    if fallback and not _is_bad_product_title(fallback):
+        return fallback[:200]
+    return ""
 
 
 def normalize_phone_digits(phone: str) -> str:
@@ -367,8 +413,21 @@ def sanitize_lead_contacts(
 ) -> dict[str, str]:
     """Clean name/phone fields before dedup and CSV export."""
     out = dict(lead)
+    if out.get("product_title"):
+        clean_title = sanitize_product_title(str(out["product_title"]), block_text)
+        if clean_title:
+            out["product_title"] = clean_title
+        else:
+            out.pop("product_title", None)
+    else:
+        clean_title = sanitize_product_title("", block_text)
+        if clean_title:
+            out["product_title"] = clean_title
+
     if out.get("buyer_name"):
         out["buyer_name"] = sanitize_buyer_name(str(out["buyer_name"]))
+        if not out["buyer_name"]:
+            out.pop("buyer_name", None)
     
     phone_raw = str(out.get("buyer_phone") or "").strip()
     if phone_raw:

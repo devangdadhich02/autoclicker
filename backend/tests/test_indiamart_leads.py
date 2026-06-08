@@ -10,6 +10,7 @@ from app.automation.indiamart_leads import (
     lead_record_is_complete,
     sanitize_buyer_name,
     sanitize_lead_contacts,
+    sanitize_product_title,
 )
 from app.automation.indiamart_page import (
     is_indiamart_logged_out_body,
@@ -162,6 +163,7 @@ def test_rejects_nav_support_phone():
 
 def test_sanitize_buyer_name_strips_nav():
     assert sanitize_buyer_name("Tools\nSettings\nTally on") == ""
+    assert sanitize_buyer_name("IndiaMART") == ""
     assert sanitize_buyer_name("Rajesh Kumar") == "Rajesh Kumar"
 
 
@@ -172,6 +174,33 @@ def test_sanitize_lead_removes_bad_phone():
         "Lead Manager\nBuy Leads",
     )
     assert "buyer_phone" not in lead
+
+
+def test_sanitize_lead_replaces_nav_product_and_name_from_feed_block():
+    block = (
+        "Laser Welding Machine\n"
+        "Ahmedabad, Gujarat\n"
+        "2 hrs ago\n"
+        "Category: Laser Welding Machine\n"
+        "I am Interested"
+    )
+    lead = sanitize_lead_contacts(
+        {
+            "buyer_phone": "9313310116",
+            "buyer_name": "IndiaMART",
+            "product_title": "Buy With IndiaMART",
+        },
+        block,
+        "IndiaMART\nBuy With IndiaMART\nLead Manager\nContact Buyer",
+    )
+    assert lead["buyer_phone"] == "9313310116"
+    assert lead["product_title"] == "Laser Welding Machine"
+    assert "buyer_name" not in lead
+
+
+def test_sanitize_product_title_rejects_nav_title():
+    block = "Laser Marking Machine\nHyderabad, Telangana\nJust Now"
+    assert sanitize_product_title("Buy With IndiaMART", block) == "Laser Marking Machine"
 
 
 def test_header_sign_in_not_logged_out_when_seller_ui_present():
