@@ -828,7 +828,7 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
                 await loc.click(timeout=4000)
                 await page.wait_for_timeout(2500)
                 clicked_any = True
-                logger.info("Clicked contact reveal button", selector=sel)
+                logger.info("Clicked contact reveal button selector=%s", sel)
                 break
         except Exception:
             continue
