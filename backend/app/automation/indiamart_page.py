@@ -635,6 +635,115 @@ async def _aggressive_open_buy_leads(page: Page) -> bool:
     return False
 
 
+async def _page_has_time_marker(page: Page) -> bool:
+    try:
+        body = await page.evaluate("() => document.body.innerText || ''")
+    except Exception:
+        body = ""
+    return bool(_TIME_AGO_RE.search(body))
+
+
+async def _log_nav_shell_diagnostics(page: Page, label: str) -> None:
+    """Log what the nav-only shell exposes so route changes are debuggable remotely."""
+    try:
+        data = await page.evaluate(
+            """() => {
+              const items = [...document.querySelectorAll('a, button, [role="link"], [role="button"]')]
+                .map((el) => {
+                  const text = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
+                  const href = el.getAttribute('href') || '';
+                  const r = el.getBoundingClientRect();
+                  return { text: text.slice(0, 80), href: href.slice(0, 140), visible: r.width > 4 && r.height > 4 };
+                })
+                .filter((x) => x.visible && (x.text || x.href))
+                .slice(0, 35);
+              return {
+                url: location.href,
+                title: document.title,
+                body_length: (document.body.innerText || '').length,
+                items,
+              };
+            }"""
+        )
+        logger.info("IndiaMART nav-shell diagnostics", label=label, diagnostic=data)
+    except Exception as exc:
+        logger.info("IndiaMART nav-shell diagnostics failed", label=label, error=str(exc))
+
+
+async def _try_bltxn_route_variants(
+    page: Page,
+    target: str,
+    heartbeat: Callable[[], Awaitable[None]],
+) -> bool:
+    """Try direct seller route variants when the SPA renders only the sidebar shell."""
+    await _log_nav_shell_diagnostics(page, "before_route_variants")
+    candidates: list[str] = []
+
+    try:
+        discovered = await page.evaluate(
+            """() => [...document.querySelectorAll('a[href]')]
+              .map((a) => a.href)
+              .filter((href) => /bltxn|buy-?leads?|leadmanager|lead-manager/i.test(href))
+              .slice(0, 20)"""
+        )
+        if isinstance(discovered, list):
+            candidates.extend(str(url) for url in discovered)
+    except Exception:
+        pass
+
+    candidates.extend(
+        [
+            target,
+            "https://seller.indiamart.com/bltxn/",
+            "https://seller.indiamart.com/bltxn",
+            "https://seller.indiamart.com/bltxn/?pref=recent",
+            "https://seller.indiamart.com/bltxn/?pref=recent#recent",
+            "https://seller.indiamart.com/bltxn/#recent",
+            "https://seller.indiamart.com/bltxn/?pref=all",
+        ]
+    )
+
+    seen: set[str] = set()
+    unique_candidates = []
+    for url in candidates:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        unique_candidates.append(url)
+
+    for idx, url in enumerate(unique_candidates[:12], start=1):
+        try:
+            logger.info("Trying IndiaMART route variant", attempt=idx, url=url)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            await page.wait_for_timeout(3500)
+            await heartbeat()
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8_000)
+            except Exception:
+                pass
+            if await _page_has_time_marker(page):
+                logger.info("IndiaMART route variant loaded buyer rows", url=url)
+                return True
+            clicked = await click_recent_buy_leads_tab(page)
+            if clicked:
+                await page.wait_for_timeout(2500)
+                if await _page_has_time_marker(page):
+                    logger.info("IndiaMART recent tab loaded buyer rows", url=url)
+                    return True
+            body = await read_indiamart_page_text(page, 2_000)
+            logger.info(
+                "IndiaMART route variant still has no buyer rows",
+                url=url,
+                body_length=len(body),
+                has_time=bool(_TIME_AGO_RE.search(body)),
+            )
+        except Exception as exc:
+            logger.warning("IndiaMART route variant failed", url=url, error=str(exc))
+
+    await _log_nav_shell_diagnostics(page, "after_route_variants")
+    return False
+
+
 async def ensure_bltxn_leads_page(
     page: Page,
     fallback_url: str = INDIAMART_LEADS_URL,
@@ -724,6 +833,7 @@ async def ensure_bltxn_leads_page(
 
         if nav_only and attempt < 2:
             logger.warning("SPA stuck on nav-only view, trying sidebar click first")
+            await _log_nav_shell_diagnostics(page, f"nav_only_attempt_{attempt + 1}")
             
             # First try: Click sidebar "Buy Leads" / "Lead Manager" link to trigger SPA
             sidebar_clicked = await open_buy_leads_main_panel(page)
@@ -747,6 +857,11 @@ async def ensure_bltxn_leads_page(
                     # SPA loaded successfully
                     await scroll_lead_list(page)
                     break
+
+            route_loaded = await _try_bltxn_route_variants(page, target, beat)
+            if route_loaded:
+                await scroll_lead_list(page)
+                break
             
             # Fallback: Hard reload if sidebar click didn't work
             logger.warning("Sidebar click didn't load content, forcing hard reload")
