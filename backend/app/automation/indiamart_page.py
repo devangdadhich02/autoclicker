@@ -231,11 +231,20 @@ async def click_recent_buy_leads_tab(page: Page) -> bool:
     return False
 
 
-async def scroll_lead_list(page: Page) -> None:
-    """Load lazy-rendered IndiaMART lead rows."""
+async def scroll_lead_list(page: Page, aggressive: bool = False) -> None:
+    """Load lazy-rendered IndiaMART lead rows.
+    
+    Args:
+        aggressive: If True, scroll more extensively to load all possible leads.
+    """
+    scroll_iterations = 25 if aggressive else 12
+    container_iterations = 20 if aggressive else 10
+    
     try:
         await page.evaluate(
-            """async () => {
+            """async (config) => {
+              const { containerIter, scrollIter } = config;
+              
               // Try multiple container selectors for lead list
               const listSelectors = [
                 '#leadList', '.byr-inqry-list', '[class*="bltxn"]',
@@ -252,52 +261,118 @@ async def scroll_lead_list(page: Page) -> None:
                 }
               }
               
-              // Scroll the container if found
+              // Scroll the container if found - keep scrolling until no new content
               if (list) {
-                for (let i = 0; i < 10; i++) {
+                let prevHeight = 0;
+                let sameHeightCount = 0;
+                for (let i = 0; i < containerIter; i++) {
                   list.scrollTop = list.scrollHeight;
-                  await new Promise(r => setTimeout(r, 600));
+                  await new Promise(r => setTimeout(r, 700));
+                  
+                  // Check if new content loaded
+                  if (list.scrollHeight === prevHeight) {
+                    sameHeightCount++;
+                    if (sameHeightCount >= 3) break; // No more content loading
+                  } else {
+                    sameHeightCount = 0;
+                    prevHeight = list.scrollHeight;
+                  }
                 }
                 list.scrollTop = 0;
                 await new Promise(r => setTimeout(r, 300));
               }
               
-              // Also scroll the window (for different layouts)
-              for (let i = 0; i < 12; i++) {
-                window.scrollBy(0, Math.max(500, window.innerHeight * 0.6));
-                await new Promise(r => setTimeout(r, 500));
+              // Also scroll the window (for different layouts) - stop only when it no longer moves.
+              let stuckWindowCount = 0;
+              for (let i = 0; i < scrollIter; i++) {
+                const beforeY = window.scrollY || window.pageYOffset || 0;
+                window.scrollBy(0, Math.max(600, window.innerHeight * 0.7));
+                await new Promise(r => setTimeout(r, 600));
+
+                const afterY = window.scrollY || window.pageYOffset || 0;
+                if (afterY <= beforeY + 4) {
+                  stuckWindowCount++;
+                  if (stuckWindowCount >= 3) break;
+                } else {
+                  stuckWindowCount = 0;
+                }
               }
               
-              // Click "Load More" or "Show More" buttons if present
+              // Click "Load More" or "Show More" buttons multiple times
               const loadMoreSelectors = [
-                'button:has-text("Load More")', 'button:has-text("Show More")',
-                'a:has-text("Load More")', '[class*="load-more"]', '[class*="show-more"]'
+                '[class*="load-more"]', '[class*="show-more"]',
+                '[class*="loadmore"]', '[class*="showmore"]'
               ];
-              for (const sel of loadMoreSelectors) {
-                try {
-                  const btn = document.querySelector(sel);
-                  if (btn) { btn.click(); await new Promise(r => setTimeout(r, 1500)); }
-                } catch(e) {}
+              
+              // Also find buttons by text content
+              const allButtons = [...document.querySelectorAll('button, a, div[role="button"], span[role="button"]')];
+              const loadMoreBtns = allButtons.filter(el => {
+                const txt = (el.innerText || el.textContent || '').toLowerCase();
+                return txt.includes('load more') || txt.includes('show more') || 
+                       txt.includes('view more') || txt.includes('see more');
+              });
+              
+              // Click load more buttons repeatedly until they disappear
+              for (let attempt = 0; attempt < 5; attempt++) {
+                let clicked = false;
+                
+                for (const sel of loadMoreSelectors) {
+                  try {
+                    const btn = document.querySelector(sel);
+                    if (btn && btn.offsetParent !== null) {
+                      btn.click();
+                      await new Promise(r => setTimeout(r, 1500));
+                      clicked = true;
+                    }
+                  } catch(e) {}
+                }
+                
+                for (const btn of loadMoreBtns) {
+                  try {
+                    if (btn.offsetParent !== null) {
+                      btn.click();
+                      await new Promise(r => setTimeout(r, 1500));
+                      clicked = true;
+                    }
+                  } catch(e) {}
+                }
+                
+                if (!clicked) break;
+                
+                // Scroll down after loading more
+                window.scrollBy(0, 500);
+                await new Promise(r => setTimeout(r, 500));
               }
               
               // Scroll back to top
               window.scrollTo(0, 0);
               if (list) list.scrollTop = 0;
-            }"""
+            }""",
+            {"containerIter": container_iterations, "scrollIter": scroll_iterations}
         )
     except Exception:
         pass
     
-    # Also try Playwright-based load more click
-    try:
-        for sel in ["button:has-text('Load More')", "button:has-text('Show More')", "[class*='load-more']"]:
-            loc = page.locator(sel).first
-            if await loc.count() > 0:
-                await loc.click(timeout=3000)
-                await page.wait_for_timeout(1500)
-                break
-    except Exception:
-        pass
+    # Also try Playwright-based load more click - multiple attempts
+    for _ in range(3):
+        clicked = False
+        try:
+            for sel in [
+                "button:has-text('Load More')", "button:has-text('Show More')",
+                "button:has-text('View More')", "button:has-text('See More')",
+                "a:has-text('Load More')", "a:has-text('Show More')",
+                "[class*='load-more']", "[class*='show-more']"
+            ]:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
+                    await loc.click(timeout=3000)
+                    await page.wait_for_timeout(1500)
+                    clicked = True
+                    break
+        except Exception:
+            pass
+        if not clicked:
+            break
 
 
 async def open_buy_leads_main_panel(page: Page) -> bool:

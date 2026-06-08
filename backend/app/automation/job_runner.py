@@ -310,7 +310,6 @@ class JobRunner:
             leads_url = _indiamart_recent_leads_url(job.target_url)
             await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
             await open_first_lead_card(page)
-            await scroll_lead_list(page)
             blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
             diag = ""

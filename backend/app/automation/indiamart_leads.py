@@ -486,16 +486,17 @@ def _blocks_from_body_text(body: str, max_blocks: int = 40) -> list[BuyerLeadBlo
     return blocks
 
 
-async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[BuyerLeadBlock]:
-    await scroll_lead_list(page)
+async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 100) -> list[BuyerLeadBlock]:
     await _wait_for_lead_feed(page)
-    await scroll_lead_list(page)
+    await scroll_lead_list(page, aggressive=True)
 
     script = """
-    (selectors) => {
+    async (config) => {
+      const { selectors, maxBlocks } = config;
       const timeRe = /(?:\\bjust\\s+now\\b|\\b\\d+\\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours|day|days)\\s*ago\\b)/i;
       const out = [];
       const seen = new Set();
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       const clean = (text) => (text || '').trim().replace(/\\n{3,}/g, '\\n');
       const push = (text, selector, rowIndex) => {
         const t = clean(text);
@@ -506,22 +507,23 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
         out.push({ text: t, row_index: rowIndex, selector: selector || 'heuristic' });
       };
       const textOf = (el) => clean(el && (el.innerText || el.textContent || ''));
-      const pushElementContext = (el, selector, rowIndex) => {
+      const pushElementContext = (el, selector, rowIndex, sampleLabel) => {
         if (!el) return;
         const base = textOf(el);
         if (!timeRe.test(base)) return;
-        push(base, selector, rowIndex);
+        const label = sampleLabel ? `${sampleLabel}:${selector || 'time'}` : selector;
+        push(base, label, rowIndex);
 
         let cur = el;
         for (let depth = 0; depth < 6 && cur && cur !== document.body; depth += 1) {
           cur = cur.parentElement;
           const txt = textOf(cur);
-          if (timeRe.test(txt)) push(txt, `${selector || 'time'}:parent-${depth + 1}`, rowIndex);
+          if (timeRe.test(txt)) push(txt, `${label || 'time'}:parent-${depth + 1}`, rowIndex);
         }
 
         const card = el.closest('li, article, section, tr, a, div[class*="lead"], div[class*="inq"], div[class*="bltxn"], div');
         const cardTxt = textOf(card);
-        if (timeRe.test(cardTxt)) push(cardTxt, `${selector || 'time'}:closest-card`, rowIndex);
+        if (timeRe.test(cardTxt)) push(cardTxt, `${label || 'time'}:closest-card`, rowIndex);
 
         const parent = el.parentElement;
         if (!parent) return;
@@ -534,42 +536,128 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
             .map(textOf)
             .filter(Boolean)
             .join('\\n');
-          if (timeRe.test(slice)) push(slice, `${selector || 'time'}:sibling-window-${radius}`, rowIndex);
+          if (timeRe.test(slice)) push(slice, `${label || 'time'}:sibling-window-${radius}`, rowIndex);
         }
       };
-      const roots = [
-        '#leadList', '.byr-inqry-list', '.bltxn-list', '[class*="bltxn"]',
-        '[class*="inqry-list"]', 'main', 'body'
-      ];
-      const scopes = [];
-      for (const r of roots) {
-        const root = document.querySelector(r);
-        if (root) scopes.push(root);
-      }
-      if (!scopes.length) scopes.push(document.body);
-      for (const scope of scopes) {
-        for (const sel of selectors) {
-          const nodes = scope.querySelectorAll(sel);
-          nodes.forEach((el, idx) => {
-            pushElementContext(el, sel, idx);
-          });
+
+      const sampleVisibleRows = (sampleLabel) => {
+        const roots = [
+          '#leadList', '.byr-inqry-list', '.bltxn-list', '[class*="bltxn"]',
+          '[class*="inqry-list"]', '[class*="lead-list"]', '[class*="inquiry-list"]',
+          '.msg-list', 'main', '[role="main"]', 'body'
+        ];
+        const scopes = [];
+        for (const r of roots) {
+          const root = document.querySelector(r);
+          if (root && !scopes.includes(root)) scopes.push(root);
         }
+        if (!scopes.length) scopes.push(document.body);
+        for (const scope of scopes) {
+          for (const sel of selectors) {
+            const nodes = scope.querySelectorAll(sel);
+            nodes.forEach((el, idx) => {
+              pushElementContext(el, sel, idx, sampleLabel);
+            });
+          }
+        }
+        const cardSel = 'div, li, article, section, a, [class*="lead"], [class*="inqry"], [class*="bltxn"]';
+        document.querySelectorAll(cardSel).forEach((el, idx) => {
+          const raw = textOf(el);
+          if (!timeRe.test(raw)) return;
+          const lines = raw.split('\\n').map(l => l.trim()).filter(Boolean);
+          if (lines.length < 2 || lines.length > 32) return;
+          if (raw.length < 30 || raw.length > 2200) return;
+          push(raw, `${sampleLabel}:card-heuristic`, idx);
+        });
+      };
+
+      const scrollRootSelectors = [
+        '#leadList', '.byr-inqry-list', '.bltxn-list', '[class*="bltxn"]',
+        '[class*="inqry-list"]', '[class*="lead-list"]', '[class*="inquiry-list"]',
+        '.msg-list', 'main', '[role="main"]'
+      ];
+      const scrollRoots = [];
+      const addRoot = (el) => {
+        if (!el || scrollRoots.includes(el)) return;
+        const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+        if (maxScroll > 80) scrollRoots.push(el);
+      };
+      for (const r of scrollRootSelectors) {
+        const root = document.querySelector(r);
+        addRoot(root);
       }
-      const cardSel = 'div, li, article, section, a, [class*="lead"], [class*="inqry"], [class*="bltxn"]';
-      document.querySelectorAll(cardSel).forEach((el, idx) => {
-        const raw = textOf(el);
-        if (!timeRe.test(raw)) return;
-        const lines = raw.split('\\n').map(l => l.trim()).filter(Boolean);
-        if (lines.length < 2 || lines.length > 32) return;
-        if (raw.length < 30 || raw.length > 2200) return;
-        push(raw, 'card-heuristic', idx);
+      const overflowNodes = [...document.querySelectorAll('div, main, section, aside, ul, table, tbody')];
+      overflowNodes.forEach((el) => {
+        const style = window.getComputedStyle(el);
+        const overflow = `${style.overflowY} ${style.overflow}`;
+        if (!/(auto|scroll)/i.test(overflow)) return;
+        addRoot(el);
       });
+      scrollRoots.sort((a, b) => {
+        const aMax = Math.max(0, a.scrollHeight - a.clientHeight);
+        const bMax = Math.max(0, b.scrollHeight - b.clientHeight);
+        return bMax - aMax;
+      });
+
+      const pageRoot = document.scrollingElement || document.documentElement || document.body;
+      if (!scrollRoots.includes(pageRoot)) scrollRoots.push(pageRoot);
+
+      const clickLoadMore = async () => {
+        const nodes = [...document.querySelectorAll('button, a, [role="button"]')];
+        for (const el of nodes) {
+          const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
+          if (!/(load more|show more|view more|see more)/.test(txt)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 4 || r.height < 4) continue;
+          try {
+            el.click();
+            await sleep(1200);
+            return true;
+          } catch (e) {}
+        }
+        return false;
+      };
+
+      scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
+      window.scrollTo(0, 0);
+      await sleep(500);
+
+      let stagnant = 0;
+      const maxSteps = 36;
+      for (let step = 0; step < maxSteps && out.length < maxBlocks * 4; step += 1) {
+        sampleVisibleRows(`scan-${step}`);
+        if (step > 0 && step % 8 === 0) await clickLoadMore();
+
+        let moved = false;
+        for (const root of scrollRoots.slice(0, 6)) {
+          try {
+            const before = root.scrollTop || 0;
+            const delta = Math.max(360, Math.floor((root.clientHeight || window.innerHeight) * 0.72));
+            root.scrollTop = Math.min(root.scrollHeight, before + delta);
+            if ((root.scrollTop || 0) > before + 4) moved = true;
+          } catch (e) {}
+        }
+        const beforeWindow = window.scrollY || pageYOffset || 0;
+        window.scrollBy(0, Math.max(420, Math.floor(window.innerHeight * 0.72)));
+        if ((window.scrollY || pageYOffset || 0) > beforeWindow + 4) moved = true;
+
+        await sleep(650);
+        stagnant = moved ? 0 : stagnant + 1;
+        if (stagnant >= 3) break;
+      }
+
+      sampleVisibleRows('scan-final');
+      scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
+      window.scrollTo(0, 0);
       return out;
     }
     """
     raw: list = []
     try:
-        raw = await page.evaluate(script, INQUIRY_ROW_SELECTORS)
+        raw = await page.evaluate(
+            script,
+            {"selectors": INQUIRY_ROW_SELECTORS, "maxBlocks": max_blocks},
+        )
     except Exception:
         raw = []
 
