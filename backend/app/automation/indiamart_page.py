@@ -192,6 +192,7 @@ async def click_recent_buy_leads_tab(page: Page) -> bool:
         "[role='tab']:has-text('Recent')",
         "button:has-text('Recent Buy Leads')",
         "button:has-text('Recent')",
+        "a:has-text('Recent')",
         "[data-testid='recent-tab']",
         "[data-testid='recent-buy-leads-tab']",
     ]
@@ -207,7 +208,14 @@ async def click_recent_buy_leads_tab(page: Page) -> bool:
     try:
         clicked = await page.evaluate(
             """() => {
-              // Only click tab-role elements or buttons, not sidebar <a> nav links
+              const clickLikeUser = (el) => {
+                el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+                el.click();
+              };
+
+              // First try tab-role elements or buttons.
               const tabNodes = [...document.querySelectorAll(
                 '[role="tab"], button, [class*="tab"]'
               )];
@@ -216,15 +224,66 @@ async def click_recent_buy_leads_tab(page: Page) -> bool:
                 if (t === 'recent' || t === 'recent buy leads') {
                   const r = el.getBoundingClientRect();
                   if (r.width < 4 || r.height < 4) continue;
-                  el.click();
+                  clickLikeUser(el);
                   return true;
                 }
+              }
+
+              // IndiaMART sometimes renders these as plain visible text nodes inside
+              // div/span/li/a elements after the shell loads.
+              const broadNodes = [...document.querySelectorAll('a, button, div, span, li')];
+              for (const el of broadNodes) {
+                const t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ').toLowerCase();
+                if (t !== 'recent' && t !== 'recent buy leads') continue;
+                const href = (el.getAttribute('href') || '').toLowerCase();
+                if (href && !href.includes('bltxn')) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 4 || r.height < 4) continue;
+                if (r.top < 0 || r.bottom > window.innerHeight + 400) continue;
+                clickLikeUser(el);
+                return true;
               }
               return false;
             }"""
         )
         if clicked:
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(3500)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def click_buy_leads_tab_by_label(page: Page, label: str) -> bool:
+    """Click visible BuyLeads tab labels like Recent, Relevant, or More Leads."""
+    label_norm = label.strip().lower()
+    if not label_norm:
+        return False
+    try:
+        clicked = await page.evaluate(
+            """(label) => {
+              const clickLikeUser = (el) => {
+                el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+                el.click();
+              };
+              const nodes = [...document.querySelectorAll('[role="tab"], a, button, div, span, li')];
+              for (const el of nodes) {
+                const t = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ').toLowerCase();
+                if (t !== label) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 4 || r.height < 4) continue;
+                if (r.top < 0 || r.bottom > window.innerHeight + 500) continue;
+                clickLikeUser(el);
+                return true;
+              }
+              return false;
+            }""",
+            label_norm,
+        )
+        if clicked:
+            await page.wait_for_timeout(3500)
             return True
     except Exception:
         pass
@@ -732,12 +791,26 @@ async def _try_bltxn_route_variants(
             if await _page_has_time_marker(page):
                 logger.info("IndiaMART route variant loaded buyer rows url=%s", url)
                 return True
-            clicked = await click_recent_buy_leads_tab(page)
-            if clicked:
-                await page.wait_for_timeout(2500)
-                if await _page_has_time_marker(page):
-                    logger.info("IndiaMART recent tab loaded buyer rows url=%s", url)
-                    return True
+            for label in ("Recent", "Relevant", "More Leads"):
+                if label == "Recent":
+                    clicked = await click_recent_buy_leads_tab(page)
+                else:
+                    clicked = await click_buy_leads_tab_by_label(page, label)
+                logger.info(
+                    "IndiaMART tab click attempt label=%s clicked=%s url=%s",
+                    label,
+                    clicked,
+                    url,
+                )
+                if clicked:
+                    await page.wait_for_timeout(3000)
+                    if await _page_has_time_marker(page):
+                        logger.info(
+                            "IndiaMART tab loaded buyer rows label=%s url=%s",
+                            label,
+                            url,
+                        )
+                        return True
             body = await read_indiamart_page_text(page, 2_000)
             logger.info(
                 "IndiaMART route variant still has no buyer rows url=%s body_length=%s has_time=%s",
