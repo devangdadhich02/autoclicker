@@ -17,6 +17,7 @@ from app.automation.indiamart_leads import (
     sanitize_product_title,
 )
 from app.automation.indiamart_page import (
+    _is_non_recent_buy_leads_url,
     is_indiamart_logged_out_body,
     is_indiamart_marketing_landing,
 )
@@ -205,6 +206,19 @@ def test_marketing_landing_detected():
         "Success Stories\nWhat can you sell"
     )
     assert is_indiamart_marketing_landing(body)
+
+
+def test_rejects_indiamart_similar_leads_url_as_recent_feed():
+    assert _is_non_recent_buy_leads_url(
+        "https://seller.indiamart.com/bltxn/buyersearch/?"
+        "ss=CO2+Laser+Cutting+Machine&screen=view_similar_leads"
+    )
+    assert _is_non_recent_buy_leads_url(
+        "https://seller.indiamart.com/bltxn/?pref=relevant"
+    )
+    assert not _is_non_recent_buy_leads_url(
+        "https://seller.indiamart.com/bltxn/?pref=recent"
+    )
 
 
 def test_accepts_just_now_feed_row():

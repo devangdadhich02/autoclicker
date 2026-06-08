@@ -31,6 +31,15 @@ INQUIRY_ROW_SELECTORS = [
 
 INDIAMART_LEADS_URL = "https://seller.indiamart.com/bltxn/?pref=recent"
 
+_NON_RECENT_BUY_LEAD_URL_MARKERS = (
+    "pref=relevant",
+    "pref=other_leads",
+    "pref=all",
+    "/buyersearch/",
+    "screen=view_similar_leads",
+    "view_similar_leads",
+)
+
 LEAD_CARD_CLICK_SELECTORS = [
     ".byr-inqry-item",
     ".byr-inqry-list .byr-inqry-item",
@@ -69,6 +78,13 @@ def is_indiamart_login_url(url: str) -> bool:
             "/sign-in",
             "/signin",
         )
+    )
+
+
+def _is_non_recent_buy_leads_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "seller.indiamart.com" in u and "bltxn" in u and any(
+        marker in u for marker in _NON_RECENT_BUY_LEAD_URL_MARKERS
     )
 
 
@@ -776,9 +792,7 @@ async def _try_bltxn_route_variants(
         if not url or url in seen:
             continue
         lowered = url.lower()
-        if "bltxn" in lowered and any(
-            pref in lowered for pref in ("pref=relevant", "pref=other_leads", "pref=all")
-        ):
+        if _is_non_recent_buy_leads_url(lowered):
             continue
         seen.add(url)
         unique_candidates.append(url)
@@ -850,9 +864,7 @@ async def ensure_bltxn_leads_page(
 
     target = INDIAMART_LEADS_URL
     fallback_lower = (fallback_url or "").lower()
-    if "bltxn" in fallback_lower and not any(
-        pref in fallback_lower for pref in ("pref=relevant", "pref=other_leads", "pref=all")
-    ):
+    if "bltxn" in fallback_lower and not _is_non_recent_buy_leads_url(fallback_lower):
         target = fallback_url
 
     for attempt in range(3):
@@ -870,8 +882,8 @@ async def ensure_bltxn_leads_page(
         current_url = page.url or ""
         logger.info(f"Current URL after navigation: {current_url}")
 
-        # Fix: if landed on relevant feed, force recent
-        if "pref=relevant" in current_url.lower():
+        # Fix: if landed on relevant/suggested feed, force Recent.
+        if _is_non_recent_buy_leads_url(current_url):
             try:
                 await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
                 await page.wait_for_timeout(1500)
@@ -988,7 +1000,7 @@ async def ensure_bltxn_leads_page(
             await asyncio.sleep(3)
 
     final_url = (page.url or "").lower()
-    if any(pref in final_url for pref in ("pref=relevant", "pref=other_leads", "pref=all")):
+    if _is_non_recent_buy_leads_url(final_url):
         logger.info("Final URL is not Recent, forcing recent before returning")
         try:
             await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
