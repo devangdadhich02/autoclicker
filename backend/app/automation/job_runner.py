@@ -18,6 +18,7 @@ from app.automation.indiamart_leads import (
     is_weak_match_context,
     lead_fingerprint,
     lead_has_buyer_contact,
+    lead_match_text,
     lead_record_is_complete,
 )
 from app.automation.indiamart_page import (
@@ -78,6 +79,13 @@ def _indiamart_recent_leads_url(target_url: str | None = None) -> str:
     if "bltxn" in target and "pref=recent" in target:
         return target_url or INDIAMART_LEADS_URL
     return INDIAMART_LEADS_URL
+
+
+def _is_non_recent_indiamart_feed(url: str | None) -> bool:
+    u = (url or "").lower()
+    return "seller.indiamart.com" in u and "bltxn" in u and any(
+        pref in u for pref in ("pref=relevant", "pref=other_leads", "pref=all")
+    )
 
 
 class JobRunner:
@@ -304,6 +312,21 @@ class JobRunner:
                 )
                 await self._handle_session_expired(page.url)
                 return
+        if _is_non_recent_indiamart_feed(page.url):
+            leads_url = _indiamart_recent_leads_url(job.target_url)
+            logger.warning(
+                "IndiaMART non-recent feed detected before scan — forcing Recent",
+                job_id=self.job_id,
+                url=page.url,
+            )
+            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+            if _is_non_recent_indiamart_feed(page.url):
+                logger.warning(
+                    "IndiaMART non-recent feed still open — skipping scan to avoid wrong leads",
+                    job_id=self.job_id,
+                    url=page.url,
+                )
+                return
         blocks = await collect_buyer_lead_blocks(page)
         if not blocks:
             # Single consolidated re-navigation attempt
@@ -372,7 +395,8 @@ class JobRunner:
 
         matches: list[tuple[BuyerLeadBlock, Any]] = []
         for block in blocks:
-            block_results = self._detection.evaluate(block.text, keywords)
+            match_text = lead_match_text(block.text)
+            block_results = self._detection.evaluate(match_text, keywords)
             if not block_results:
                 continue
             result = block_results[0]

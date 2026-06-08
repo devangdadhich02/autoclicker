@@ -775,6 +775,11 @@ async def _try_bltxn_route_variants(
     for url in candidates:
         if not url or url in seen:
             continue
+        lowered = url.lower()
+        if "bltxn" in lowered and any(
+            pref in lowered for pref in ("pref=relevant", "pref=other_leads", "pref=all")
+        ):
+            continue
         seen.add(url)
         unique_candidates.append(url)
 
@@ -791,26 +796,29 @@ async def _try_bltxn_route_variants(
             if await _page_has_time_marker(page):
                 logger.info("IndiaMART route variant loaded buyer rows url=%s", url)
                 return True
-            for label in ("Recent", "Relevant", "More Leads"):
-                if label == "Recent":
-                    clicked = await click_recent_buy_leads_tab(page)
-                else:
-                    clicked = await click_buy_leads_tab_by_label(page, label)
+            clicked = await click_recent_buy_leads_tab(page)
+            logger.info(
+                "IndiaMART tab click attempt label=%s clicked=%s url=%s",
+                "Recent",
+                clicked,
+                url,
+            )
+            if clicked:
+                await page.wait_for_timeout(3000)
+                if await _page_has_time_marker(page):
+                    logger.info(
+                        "IndiaMART tab loaded buyer rows label=%s url=%s",
+                        "Recent",
+                        url,
+                    )
+                    return True
+            body_after_recent = await read_indiamart_page_text(page, 2_000)
+            if bool(_TIME_AGO_RE.search(body_after_recent)):
                 logger.info(
-                    "IndiaMART tab click attempt label=%s clicked=%s url=%s",
-                    label,
-                    clicked,
+                    "IndiaMART Recent feed loaded buyer rows url=%s",
                     url,
                 )
-                if clicked:
-                    await page.wait_for_timeout(3000)
-                    if await _page_has_time_marker(page):
-                        logger.info(
-                            "IndiaMART tab loaded buyer rows label=%s url=%s",
-                            label,
-                            url,
-                        )
-                        return True
+                return True
             body = await read_indiamart_page_text(page, 2_000)
             logger.info(
                 "IndiaMART route variant still has no buyer rows url=%s body_length=%s has_time=%s",
@@ -841,7 +849,10 @@ async def ensure_bltxn_leads_page(
             pass
 
     target = INDIAMART_LEADS_URL
-    if "bltxn" in (fallback_url or "").lower():
+    fallback_lower = (fallback_url or "").lower()
+    if "bltxn" in fallback_lower and not any(
+        pref in fallback_lower for pref in ("pref=relevant", "pref=other_leads", "pref=all")
+    ):
         target = fallback_url
 
     for attempt in range(3):
@@ -976,8 +987,9 @@ async def ensure_bltxn_leads_page(
         if attempt < 2:
             await asyncio.sleep(3)
 
-    if "pref=relevant" in (page.url or "").lower():
-        logger.info("Final URL still relevant, forcing recent before returning")
+    final_url = (page.url or "").lower()
+    if any(pref in final_url for pref in ("pref=relevant", "pref=other_leads", "pref=all")):
+        logger.info("Final URL is not Recent, forcing recent before returning")
         try:
             await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_timeout(1500)

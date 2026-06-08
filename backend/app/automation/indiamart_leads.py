@@ -154,6 +154,16 @@ _BAD_PRODUCT_TITLES = frozenset(
         "profile",
     }
 )
+_MATCH_TEXT_STOP_MARKERS = (
+    "buyer info",
+    "buyer also viewed",
+    "also viewed",
+    "similar products",
+    "recommended",
+    "you sell",
+    "your products",
+    "related products",
+)
 
 
 @dataclass
@@ -819,6 +829,85 @@ def _lead_title_for_click(block_text: str) -> str:
     if cat and len(cat.group(1).strip()) >= 8:
         return cat.group(1).strip()[:120]
     return ""
+
+
+def lead_match_text(block_text: str) -> str:
+    """
+    Text that is safe for keyword matching.
+
+    IndiaMART cards can include recommendations, seller catalog snippets, or buyer-profile
+    text. Matching the whole block can pick wrong products. Keep only the lead's own title,
+    category/search intent, and location so location filters still work.
+    """
+    parts: list[str] = []
+
+    def add(value: str) -> None:
+        value = re.sub(r"\s+", " ", (value or "").strip(" ,-|:"))
+        if not value or len(value) < 3:
+            return
+        low = value.lower()
+        if low in _LOW_VALUE_LEAD_LINES or low in _BAD_PRODUCT_TITLES:
+            return
+        if value not in parts:
+            parts.append(value)
+
+    lead_only_lines: list[str] = []
+    for raw in block_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if any(marker in line.lower() for marker in _MATCH_TEXT_STOP_MARKERS):
+            break
+        lead_only_lines.append(line)
+
+    lead_only_text = "\n".join(lead_only_lines) if lead_only_lines else block_text
+    title = _lead_title_for_click(lead_only_text)
+    if title:
+        add(title)
+
+    for line in lead_only_lines:
+        line = re.sub(r"^category\s*:\s*", "Category: ", line, flags=re.IGNORECASE)
+        m = re.search(r"\bcategory\s*:\s*(.+)$", line, re.IGNORECASE)
+        if m:
+            add(m.group(1))
+            continue
+        m = re.search(r"\bbuyer\s+searched\s+for\s+(.+)$", line, re.IGNORECASE)
+        if m:
+            add(m.group(1))
+            continue
+        if _TIME_RE.search(line) or _CITY_STATE_RE.search(line):
+            continue
+        lower = line.lower().strip(" :")
+        if lower in _LOW_VALUE_LEAD_LINES or lower in (
+            "laser power",
+            "power",
+            "marking area",
+            "working area",
+            "requirement type",
+            "probable requirement type",
+            "finance/loan requirement",
+            "automatic grade",
+        ):
+            continue
+        if _looks_like_product_line(line):
+            add(line)
+
+    one = " ".join(lead_only_text.split())
+    for pat in (
+        r"\bCategory\s*:\s*([^:]+?)(?:\s+(?:Buyer\s+Searched|Laser\s+Power|"
+        r"Power|Marking\s+Area|Requirement\s+Type)\b|$)",
+        r"\bBuyer\s+Searched\s+for\s+(.+?)(?:\s+(?:Laser\s+Power|Power|"
+        r"Marking\s+Area|Requirement\s+Type)\b|$)",
+        r">\s*([^>]+?)(?:\s+(?:Working\s+Area|Laser\s+Power|Power|Probable|"
+        r"Requirement\s+Type|Price|Quantity)\s*:|\s+Probable\b|\s*$)",
+    ):
+        for match in re.finditer(pat, one, re.IGNORECASE):
+            add(match.group(1))
+
+    address = _parse_address_from_text(block_text)
+    if address:
+        add(address)
+    return "\n".join(parts) if parts else block_text
 
 
 _INTEREST_BUTTON_LABELS = (

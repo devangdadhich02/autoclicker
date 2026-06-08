@@ -1,3 +1,6 @@
+import types
+
+from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
     _blocks_from_body_text,
     _lead_title_for_click,
@@ -7,6 +10,7 @@ from app.automation.indiamart_leads import (
     is_weak_match_context,
     lead_fingerprint,
     lead_has_buyer_contact,
+    lead_match_text,
     lead_record_is_complete,
     sanitize_buyer_name,
     sanitize_lead_contacts,
@@ -16,6 +20,22 @@ from app.automation.indiamart_page import (
     is_indiamart_logged_out_body,
     is_indiamart_marketing_landing,
 )
+from app.models.keyword import MatchType
+
+
+def make_keyword(value: str) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        id=value,
+        value=value,
+        match_type=MatchType.contains,
+        case_sensitive=False,
+        priority=5,
+        score=1.0,
+        cooldown_seconds=0,
+        location_filter=None,
+        is_active=True,
+        match_count=0,
+    )
 
 
 def test_rejects_parts_and_spares_nav():
@@ -31,6 +51,70 @@ def test_accepts_realistic_buyer_row():
         "I am Interested"
     )
     assert is_buyer_inquiry_block(text)
+
+
+def test_client_metal_laser_marking_machine_matches_keyword():
+    block = (
+        "Metal Laser Marking Machine\n"
+        "Agra, Uttar Pradesh\n"
+        "10 mins ago\n"
+        "Phone Email WhatsApp GST\n"
+        "Category: Metal Laser Marking Machine\n"
+        "Buyer Searched for Metal Laser Marking Machine\n"
+        "Laser Power : 30 W\n"
+        "Marking Area : 300 x 300 mm\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested\n"
+        "Buyer Info"
+    )
+    assert is_buyer_inquiry_block(block)
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Laser marking machine")]
+    )
+    assert len(results) == 1
+
+
+def test_client_laser_marking_machine_matches_keyword():
+    block = (
+        "Laser Marking Machine\n"
+        "Sonipat, Haryana\n"
+        "2 hrs ago\n"
+        "Phone\n"
+        "Category: Laser Marking Machine\n"
+        "Power : 30 W\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(block)
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Laser marking machine")]
+    )
+    assert len(results) == 1
+
+
+def test_keyword_match_ignores_related_product_noise():
+    block = (
+        "Laser Marking Machine\n"
+        "Sonipat, Haryana\n"
+        "2 hrs ago\n"
+        "Category: Laser Marking Machine\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested\n"
+        "Buyer Info\n"
+        "Gold Testing Machine\n"
+        "Double Holder Machine\n"
+        "Wall Mounted Cleaning Stations"
+    )
+    match_text = lead_match_text(block)
+    assert "Gold Testing Machine" not in match_text
+    assert "Double Holder Machine" not in match_text
+    results = DetectionEngine("test-job").evaluate(
+        match_text, [make_keyword("Gold Testing Machine")]
+    )
+    assert results == []
 
 
 def test_lead_complete_with_phone():
