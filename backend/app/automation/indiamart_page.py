@@ -378,21 +378,41 @@ async def scroll_lead_list(page: Page, aggressive: bool = False) -> None:
 async def open_buy_leads_main_panel(page: Page) -> bool:
     """Click sidebar/main Buy Leads so SPA loads the recent feed (not nav-only chrome)."""
     try:
-        # Most reliable path: links that explicitly route to bltxn.
+        # Most reliable path: links that explicitly route to bltxn/recent.
+        # Score candidates so the real "BuyLeads" child wins before a generic
+        # "Lead Manager" parent that can leave the SPA in a nav-only shell.
         href_hit = await page.evaluate(
             """() => {
-              const all = [...document.querySelectorAll('a[href*="bltxn"], a[href*="pref=recent"]')];
-              const groups = [
-                all.filter(a => (a.getAttribute('href') || '').toLowerCase().includes('pref=recent')),
-                all.filter(a => !(a.getAttribute('href') || '').toLowerCase().includes('pref=relevant')),
-                all,
-              ];
-              for (const links of groups) {
-                for (const a of links) {
-                  const r = a.getBoundingClientRect();
-                  if (r.width < 6 || r.height < 6) continue;
-                  try { a.click(); return true; } catch (e) {}
+              const candidates = [];
+              const links = [...document.querySelectorAll('a, button, [role="link"], [role="button"]')];
+              for (const el of links) {
+                const href = (el.getAttribute('href') || '').toLowerCase();
+                const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                const compact = text.replace(/\\s+/g, '');
+                if (!href.includes('bltxn') && !href.includes('pref=recent') && !/^buyleads?$/.test(compact)) {
+                  continue;
                 }
+                if (href.includes('pref=relevant')) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 6 || r.height < 6) continue;
+                let score = 0;
+                if (href.includes('pref=recent')) score += 50;
+                if (href.includes('bltxn')) score += 35;
+                if (/^buyleads?$/.test(compact)) score += 45;
+                if (text.includes('lead manager')) score -= 20;
+                score -= Math.min(text.length, 80) / 10;
+                candidates.push({ el, score });
+              }
+              candidates.sort((a, b) => b.score - a.score);
+              for (const item of candidates) {
+                try {
+                  const el = item.el;
+                  el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));
+                  el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+                  el.click();
+                  return true;
+                } catch (e) {}
               }
               return false;
             }"""
@@ -408,6 +428,7 @@ async def open_buy_leads_main_panel(page: Page) -> bool:
               const skip = /sign in|help|logout|products|photos|invoice|settings|tally/i;
               const want = /buy\\s*leads?|lead\\s*manager|buyleads/i;
               const nodes = [...document.querySelectorAll('a, button, span, div, li')];
+              const candidates = [];
               for (const el of nodes) {
                 const t = (el.innerText || '').trim();
                 if (!t || t.length > 36 || skip.test(t)) continue;
@@ -415,6 +436,16 @@ async def open_buy_leads_main_panel(page: Page) -> bool:
                 if (!want.test(t) && !compact.startsWith('buyleads') && !compact.startsWith('leadmanager')) continue;
                 const r = el.getBoundingClientRect();
                 if (r.width < 8 || r.height < 8) continue;
+                let score = 0;
+                if (/^buyleads?$/.test(compact)) score += 60;
+                if (/^buy\\s*leads?$/.test(t.toLowerCase())) score += 55;
+                if (compact.startsWith('leadmanager')) score += 10;
+                score -= Math.min(t.length, 60) / 10;
+                candidates.push({ el, score });
+              }
+              candidates.sort((a, b) => b.score - a.score);
+              for (const item of candidates) {
+                const el = item.el;
                 // React-friendly click sequence
                 el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
                 el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }));

@@ -171,3 +171,45 @@ def test_location_filter_not_set():
     kw = make_keyword("kw14", "pvc pipe", location_filter=None)
     results = engine.evaluate("Buyer from Chennai wants pvc pipe", [kw])
     assert len(results) == 1
+
+
+def test_hyderabad_marking_machine_matches_when_telangana_allowed():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword(
+        "kw-hyd-marking",
+        "Laser marking machine",
+        match_type=MatchType.contains,
+        location_filter="Telangana, Hyderabad",
+    )
+    text = (
+        "Laser Marking Machine\n"
+        "Hyderabad, Telangana\n"
+        "Just Now\n"
+        "Category: Laser Marking Machine\n"
+        "Power : 60 W\n"
+        "Requirement Type : Business Use\n"
+        "I am Interested"
+    )
+    results = engine.evaluate(text, [kw])
+    assert len(results) == 1
+
+
+def test_hyderabad_marking_machine_matches_without_location_filter():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword(
+        "kw-hyd-marking-no-filter",
+        "Laser marking machine",
+        match_type=MatchType.contains,
+        location_filter=None,
+    )
+    text = (
+        "Laser Marking Machine\n"
+        "Hyderabad, Telangana\n"
+        "Just Now\n"
+        "Category: Laser Marking Machine\n"
+        "Power : 60 W\n"
+        "Requirement Type : Business Use\n"
+        "I am Interested"
+    )
+    results = engine.evaluate(text, [kw])
+    assert len(results) == 1

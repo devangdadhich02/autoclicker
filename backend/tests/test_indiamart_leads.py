@@ -133,6 +133,25 @@ def test_accepts_just_now_feed_row():
     assert is_buyer_inquiry_block(text)
 
 
+def test_accepts_hyderabad_marking_machine_just_now_card():
+    text = (
+        "Laser Marking Machine\n"
+        "Hyderabad, Telangana\n"
+        "Just Now\n"
+        "Phone Email\n"
+        "Category: Laser Marking Machine\n"
+        "for stone craving and other materials\n"
+        "Power : 60 W\n"
+        "Marking Area : 200x200 mm\n"
+        "Laser Source Brand : Raycus\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(text)
+    assert _parse_address_from_text(text) == "Hyderabad, Telangana"
+
+
 def test_rejects_nav_support_phone():
     assert not is_plausible_buyer_phone(
         "9716054356",

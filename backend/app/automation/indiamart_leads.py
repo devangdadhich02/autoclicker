@@ -90,17 +90,11 @@ _NAV_NAME_MARKERS = frozenset(
 )
 _PHONE_RE = re.compile(r"(?:\+91[\s-]?)?[6-9]\d{9}")
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
-_LOCATION_RE = re.compile(
-    r"\b(?:new\s+delhi|delhi|mumbai|bangalore|bengaluru|punjab|haryana|gujarat|"
-    r"kolkata|chennai|hyderabad|noida|gurgaon|gurugram|uttar\s+pradesh|"
-    r"maharashtra|rajasthan|kheda|ahmedabad|surat|pune|jaipur|lucknow|"
-    r"indore|bhopal|kanpur|nagpur|thane|vadodara|coimbatore|kochi|"
-    r"kerala|tamil\s+nadu|karnataka|west\s+bengal|madhya\s+pradesh)\b",
-    re.IGNORECASE,
-)
-# "Kheda, Gujarat" / "Mumbai, Maharashtra" style lines
+# Internal address recognizer only. This is not a user keyword/location filter;
+# it recognizes "City, State" style text without hardcoding any city/state names.
 _CITY_STATE_RE = re.compile(
-    r"[A-Za-z][A-Za-z\s]{1,40},\s*[A-Za-z][A-Za-z\s]{2,30}",
+    r"\b[A-Za-z][A-Za-z\s.'-]{1,60},\s*[A-Za-z][A-Za-z\s.'-]{1,60}\b",
+    re.IGNORECASE,
 )
 
 _GENERIC_MATCH_WORDS = frozenset(
@@ -158,7 +152,13 @@ def _is_location_line(line: str) -> bool:
     line = line.strip(" ,")
     if not line:
         return False
-    return bool(_LOCATION_RE.fullmatch(line) or _CITY_STATE_RE.fullmatch(line))
+    return bool(_CITY_STATE_RE.fullmatch(line))
+
+
+def _clean_address_line(line: str) -> str:
+    line = _TIME_RE.sub("", line or "")
+    line = re.sub(r"\b(?:just\s+now)\b", "", line, flags=re.IGNORECASE)
+    return line.strip(" ,-|·•")
 
 
 def _looks_like_product_line(line: str) -> bool:
@@ -254,7 +254,7 @@ def is_seller_incoming_buy_lead(text: str) -> bool:
         or "business use" in lower
         or any(p in lower for p in _SOFT_LEAD_UI_PHRASES)
     )
-    has_loc = bool(_LOCATION_RE.search(t)) or bool(_CITY_STATE_RE.search(t))
+    has_loc = bool(_CITY_STATE_RE.search(t))
     return has_product_line and (has_interest or has_loc)
 
 
@@ -274,25 +274,23 @@ def _parse_address_from_text(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
         if line == "," and 0 < idx < len(lines) - 1:
-            city = lines[idx - 1].strip(" ,")
-            state = lines[idx + 1].strip(" ,")
+            city = _clean_address_line(lines[idx - 1])
+            state = _clean_address_line(lines[idx + 1])
             joined = f"{city}, {state}"
-            if (
-                _CITY_STATE_RE.fullmatch(joined)
-                or (_LOCATION_RE.search(city) and _LOCATION_RE.search(state))
-            ):
-                return joined[:300]
-    for idx, line in enumerate(lines):
-        line = line.strip()
-        if not line or _TIME_RE.search(line):
-            continue
-        if idx + 1 < len(lines):
-            joined = f"{line.strip(' ,')}, {lines[idx + 1].strip(' ,')}"
             if _CITY_STATE_RE.fullmatch(joined):
                 return joined[:300]
-        if _LOCATION_RE.search(line) or ("," in line and len(line) < 120):
-            return line[:300]
-    loc = _LOCATION_RE.search(text)
+    for idx, line in enumerate(lines):
+        line = _clean_address_line(line)
+        if not line:
+            continue
+        if idx + 1 < len(lines):
+            joined = f"{line.strip(' ,')}, {_clean_address_line(lines[idx + 1])}"
+            if _CITY_STATE_RE.fullmatch(joined):
+                return joined[:300]
+        loc = _CITY_STATE_RE.search(line)
+        if loc:
+            return loc.group(0)[:300]
+    loc = _CITY_STATE_RE.search(_clean_address_line(text))
     return loc.group(0) if loc else ""
 
 
@@ -306,7 +304,7 @@ def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str
     if email:
         return f"em:{email}"
     one = _TIME_RE.sub("", " ".join(block_text.split())).lower()
-    loc = _CITY_STATE_RE.search(block_text) or _LOCATION_RE.search(block_text)
+    loc = _CITY_STATE_RE.search(block_text)
     city = (loc.group(0) if loc else "").lower().strip()
     cat = re.search(r">\s*([^>]+?)(?:\s+power\s*:|\s+probable)", one, re.I)
     product = cat.group(1).strip().lower()[:80] if cat else ""
@@ -720,7 +718,6 @@ def _lead_title_for_click(block_text: str) -> str:
         if (
             lower in ("sold out!", "i am interested", "business use", "probable requirement type")
             or line in (",", ">")
-            or _LOCATION_RE.fullmatch(line)
             or _CITY_STATE_RE.fullmatch(line)
         ):
             continue
@@ -1063,7 +1060,7 @@ async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
               // Try first h1/h2/h3/h4/strong in popup
               if (!name && panelText) {
                 const lines = panelText.split('\n').map(l => l.trim()).filter(Boolean);
-                const skipWords = /email|mobile|phone|contact|verified|last seen|member|enterprise|pvt|ltd|india|pradesh|gujarat|maharashtra|dashboard|leads|settings|logout|help|\d/i;
+                const skipWords = /email|mobile|phone|contact|verified|last seen|member|enterprise|pvt|ltd|dashboard|leads|settings|logout|help|\d/i;
                 for (const line of lines.slice(0, 6)) {
                   if (skipWords.test(line)) continue;
                   if (line.length >= 2 && line.length <= 60 && /[A-Za-z]/.test(line)) {
@@ -1234,7 +1231,7 @@ def _extract_product_title_from_panel(text: str) -> str:
     for line in lines[:5]:  # Check first 5 lines
         if _TIME_RE.search(line):
             continue
-        if _LOCATION_RE.search(line) and len(line) < 50:
+        if _CITY_STATE_RE.search(line) and len(line) < 80:
             continue
         if len(line) >= 10 and re.search(r"[a-zA-Z]{4,}", line):
             # Skip common UI text
@@ -1256,11 +1253,11 @@ def _extract_name_from_panel_top(panel_text: str) -> str:
             continue
         if any(m in low for m in ("email", "mobile", "phone", "contact", "verified",
                                    "last seen", "member since", "enterprise", "pvt",
-                                   "ltd", "india", "pradesh", "gujarat", "maharashtra")):
+                                   "ltd")):
             continue
         if _TIME_RE.search(line):
             continue
-        if _LOCATION_RE.search(line) and len(line) < 60:
+        if _CITY_STATE_RE.search(line) and len(line) < 80:
             continue
         if _PHONE_RE.search(line) or _EMAIL_RE.search(line):
             continue
@@ -1311,7 +1308,7 @@ async def extract_buyer_details(
         if title:
             lead["product_title"] = title[:200]
         lead["buyer_address"] = _parse_address_from_text(block_text)
-        loc = _LOCATION_RE.search(block_text)
+        loc = _CITY_STATE_RE.search(block_text)
         if loc:
             lead["buyer_location"] = loc.group(0)
         if not lead.get("buyer_address"):
@@ -1397,7 +1394,7 @@ async def extract_buyer_details(
 
     combined = f"{block_text}\n{panel_text}"
     if not lead.get("buyer_location"):
-        loc = _LOCATION_RE.search(combined)
+        loc = _CITY_STATE_RE.search(combined)
         if loc:
             lead["buyer_location"] = loc.group(0)
     if not lead.get("buyer_address"):
