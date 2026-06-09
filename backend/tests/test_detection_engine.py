@@ -53,6 +53,14 @@ def test_contains_semantic_marking_matches_engraving():
     assert len(results) == 1
 
 
+def test_short_marking_keyword_does_not_match_generic_engraving_machine():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw-short-marking", "Laser marking machine")
+    text = "Co2 Laser Engraving Machine\nSaudi Arabia, Engraving Machines"
+    results = engine.evaluate(text, [kw])
+    assert results == []
+
+
 def test_exact_match():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw2", "pipe", match_type=MatchType.exact)

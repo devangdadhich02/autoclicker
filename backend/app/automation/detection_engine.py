@@ -153,29 +153,31 @@ class DetectionEngine:
         flags = 0 if case_sensitive else re.IGNORECASE
         t = term if case_sensitive else term.lower()
         body = text if case_sensitive else text.lower()
-        t_norm = _normalize_semantic_tokens(t)
+        words = _significant_words(t)
+        if not words:
+            return None
+        specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
+        allow_semantic_alias = len(specific) >= 3
         body_norm = _normalize_semantic_tokens(body)
 
-        # First check: exact phrase match (normalized)
-        if t in body or t_norm in body_norm:
+        # First check: exact phrase match. Semantic aliases are allowed only for
+        # longer/specific product phrases; short phrases stay literal.
+        if t in body or (
+            allow_semantic_alias and _normalize_semantic_tokens(t) in body_norm
+        ):
             return re.search(re.escape(term), text, flags) or re.search(
                 re.escape(_significant_words(term)[0]), text, flags
             )
 
-        # Get all words from term (3+ chars)
-        words = _significant_words(t)
-        if not words:
-            return None
-
-        # Filter out generic words to get specific/product words
-        specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
-
         # CRITICAL FIX: Require ALL specific words to match, not just some
         # This prevents "laser marking" from matching "laser engraving"
         if specific:
-            # Check if ALL specific words are present
+            # Check if ALL specific words are present. For short keywords like
+            # "Laser marking machine", do not let the marking/engraving alias
+            # broaden the match into unrelated IndiaMART recommendations.
             all_specific_match = all(
-                w in body or _normalize_semantic_tokens(w) in body_norm
+                w in body
+                or (allow_semantic_alias and _normalize_semantic_tokens(w) in body_norm)
                 for w in specific
             )
             if not all_specific_match:
