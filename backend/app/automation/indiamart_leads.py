@@ -861,6 +861,34 @@ def lead_match_text(block_text: str) -> str:
         lead_only_lines.append(line)
 
     lead_only_text = "\n".join(lead_only_lines) if lead_only_lines else block_text
+
+    buyer_search_terms: list[str] = []
+    for line in lead_only_lines:
+        m = re.search(r"\bbuyer\s+searched\s+for\s+(.+)$", line, re.IGNORECASE)
+        if m:
+            term = re.sub(r"\s+", " ", m.group(1).strip(" ,-|:"))
+            if term and term.lower() not in _LOW_VALUE_LEAD_LINES:
+                buyer_search_terms.append(term)
+
+    one = " ".join(lead_only_text.split())
+    for match in re.finditer(
+        r"\bBuyer\s+Searched\s+for\s+(.+?)(?:\s+(?:Laser\s+Power|Power|"
+        r"Marking\s+Area|Requirement\s+Type|Requirement\s*:|Sold\s+Out|Buyer\s+Info)\b|$)",
+        one,
+        re.IGNORECASE,
+    ):
+        term = re.sub(r"\s+", " ", match.group(1).strip(" ,-|:"))
+        if term and term.lower() not in _LOW_VALUE_LEAD_LINES:
+            buyer_search_terms.append(term)
+
+    if buyer_search_terms:
+        for term in buyer_search_terms:
+            add(term)
+        address = _parse_address_from_text(block_text)
+        if address:
+            add(address)
+        return "\n".join(parts) if parts else block_text
+
     title = _lead_title_for_click(lead_only_text)
     if title:
         add(title)
@@ -892,7 +920,6 @@ def lead_match_text(block_text: str) -> str:
         if _looks_like_product_line(line):
             add(line)
 
-    one = " ".join(lead_only_text.split())
     for pat in (
         r"\bCategory\s*:\s*([^:]+?)(?:\s+(?:Buyer\s+Searched|Laser\s+Power|"
         r"Power|Marking\s+Area|Requirement\s+Type)\b|$)",

@@ -96,6 +96,47 @@ def test_client_laser_marking_machine_matches_keyword():
     assert len(results) == 1
 
 
+def test_buyer_searched_for_overrides_indiamart_recommended_title():
+    block = (
+        "Laser Marking Machine\n"
+        "Gurugram, Haryana\n"
+        "2 hrs ago\n"
+        "Phone WhatsApp\n"
+        "Category: Laser Marking Machine\n"
+        "Buyer Searched for sport t shirt\n"
+        "Power : 50 W\n"
+        "Marking Area : 100x100 mm\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    match_text = lead_match_text(block)
+    assert "sport t shirt" in match_text
+    assert "Laser Marking Machine" not in match_text
+    results = DetectionEngine("test-job").evaluate(
+        match_text, [make_keyword("Laser marking machine")]
+    )
+    assert results == []
+
+
+def test_buyer_searched_for_matching_product_still_matches_keyword():
+    block = (
+        "Laser Marking System\n"
+        "Jhunjhunu, Rajasthan\n"
+        "11 mins ago\n"
+        "Phone Email WhatsApp GST\n"
+        "Category: Laser Marking System\n"
+        "Buyer Searched for Laser Marking System\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Laser marking machine")]
+    )
+    assert len(results) == 1
+
+
 def test_keyword_match_ignores_related_product_noise():
     block = (
         "Laser Marking Machine\n"
