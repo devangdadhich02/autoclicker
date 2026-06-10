@@ -450,6 +450,29 @@ class JobRunner:
             if retry_until:
                 self._partial_contact_retry_until.pop(pre_fp, None)
 
+            click_match_text = lead_match_text(block.text)
+            click_guard = DetectionEngine(f"{self.job_id}:click_guard")
+            click_results = click_guard.evaluate(click_match_text, keywords)
+            click_result = next(
+                (
+                    r
+                    for r in click_results
+                    if r.keyword_id == result.keyword_id
+                    and not is_weak_match_context(r.context_snippet, r.keyword_value)
+                ),
+                None,
+            )
+            if not click_result:
+                logger.warning(
+                    "Matched row skipped before click — keyword no longer validates",
+                    job_id=self.job_id,
+                    keyword=result.keyword_value,
+                    match_text=click_match_text[:300],
+                    block_preview=block.text[:300],
+                )
+                continue
+            result = click_result
+
             if captured > 0:
                 # Navigate back to feed after detail panel - lightweight vs full re-nav
                 try:
@@ -476,12 +499,17 @@ class JobRunner:
                     keyword=result.keyword_value,
                     row_clicked=clicked,
                 )
-                # Persist partial lead so matched inquiries are not completely lost.
+                # Persist partial lead so matched inquiries stay visible in Vellora
+                # while contact-reveal diagnostics explain why phone/email is blank.
                 partial_fp = f"partial:{pre_fp}"
                 retry_at = datetime.now(UTC) + timedelta(
                     seconds=_PARTIAL_CONTACT_RETRY_SECONDS
                 )
                 self._partial_contact_retry_until[pre_fp] = retry_at
+                contact_reason = lead.get(
+                    "contact_status_reason",
+                    "contact not revealed on IndiaMART",
+                )
                 if partial_fp not in self._seen_lead_fingerprints:
                     self._seen_lead_fingerprints.add(partial_fp)
                     partial_details = {
@@ -496,8 +524,10 @@ class JobRunner:
                     partial_msg = (
                         f"Partial buyer lead — {lead.get('product_title', result.keyword_value)} | "
                         f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
-                        "Contact not revealed on IndiaMART"
+                        f"Contact not revealed: {contact_reason}"
                     )
+                    if not partial_details.get("message"):
+                        partial_details["message"] = partial_msg
                     await self._increment_lead()
                     await self._log_event(
                         "lead_extracted",
@@ -524,6 +554,7 @@ class JobRunner:
                         "block_preview": block.text[:500],
                         "extracted": lead,
                         "row_clicked": clicked,
+                        "contact_status_reason": contact_reason,
                         "next_contact_retry_at": retry_at.isoformat(),
                         "diagnostic": diagnostic_details,
                     },

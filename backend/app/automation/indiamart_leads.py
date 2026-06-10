@@ -93,7 +93,7 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}", re.IGNORECASE)
 # Internal address recognizer only. This is not a user keyword/location filter;
 # it recognizes "City, State" style text without hardcoding any city/state names.
 _CITY_STATE_RE = re.compile(
-    r"\b[A-Za-z][A-Za-z\s.'-]{1,60},\s*[A-Za-z][A-Za-z\s.'-]{1,60}\b",
+    r"\b[A-Za-z][A-Za-z\s.'-]{1,60},\s*[A-Za-z][A-Za-z\s.'&-]{1,60}\b",
     re.IGNORECASE,
 )
 
@@ -126,12 +126,23 @@ _LOW_VALUE_LEAD_LINES = frozenset(
         "recent",
         "buy leads",
         "all",
+        "recommended",
         "sold out!",
         "i am interested",
         "business use",
         "probable requirement type",
         "requirement type",
         "category",
+    }
+)
+_LEAD_BLOCK_BOUNDARY_LINES = frozenset(
+    {
+        "i am interested",
+        "sold out!",
+        "buyer info",
+        "buyer also viewed",
+        "also viewed",
+        "similar products",
     }
 )
 _BAD_BUYER_NAMES = frozenset(
@@ -164,6 +175,12 @@ _MATCH_TEXT_STOP_MARKERS = (
     "your products",
     "related products",
 )
+_NON_LEAD_SECTION_LINES = frozenset(
+    {
+        "no relevant buyleads found",
+        "showing other leads you may like",
+    }
+)
 
 
 @dataclass
@@ -189,6 +206,18 @@ def _clean_address_line(line: str) -> str:
     line = _TIME_RE.sub("", line or "")
     line = re.sub(r"\b(?:just\s+now)\b", "", line, flags=re.IGNORECASE)
     return line.strip(" ,-|·•")
+
+
+def _looks_like_address_part(line: str) -> bool:
+    line = line.strip(" ,")
+    if not line:
+        return False
+    lower = line.lower().strip(" :")
+    if lower in _LOW_VALUE_LEAD_LINES or lower in _NON_LEAD_SECTION_LINES:
+        return False
+    if _PRODUCT_LINE_RE.search(line):
+        return False
+    return bool(re.search(r"[A-Za-z]{3,}", line))
 
 
 def _looks_like_product_line(line: str) -> bool:
@@ -307,7 +336,11 @@ def _parse_address_from_text(text: str) -> str:
             city = _clean_address_line(lines[idx - 1])
             state = _clean_address_line(lines[idx + 1])
             joined = f"{city}, {state}"
-            if _CITY_STATE_RE.fullmatch(joined):
+            if (
+                _looks_like_address_part(city)
+                and _looks_like_address_part(state)
+                and _CITY_STATE_RE.fullmatch(joined)
+            ):
                 return joined[:300]
     for idx, line in enumerate(lines):
         line = _clean_address_line(line)
@@ -315,13 +348,19 @@ def _parse_address_from_text(text: str) -> str:
             continue
         if idx + 1 < len(lines):
             joined = f"{line.strip(' ,')}, {_clean_address_line(lines[idx + 1])}"
-            if _CITY_STATE_RE.fullmatch(joined):
+            if (
+                _looks_like_address_part(line)
+                and _looks_like_address_part(_clean_address_line(lines[idx + 1]))
+                and _CITY_STATE_RE.fullmatch(joined)
+            ):
                 return joined[:300]
         loc = _CITY_STATE_RE.search(line)
-        if loc:
+        if loc and all(_looks_like_address_part(part) for part in loc.group(0).split(",", 1)):
             return loc.group(0)[:300]
     loc = _CITY_STATE_RE.search(_clean_address_line(text))
-    return loc.group(0) if loc else ""
+    if loc and all(_looks_like_address_part(part) for part in loc.group(0).split(",", 1)):
+        return loc.group(0)
+    return ""
 
 
 def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str:
@@ -517,26 +556,50 @@ _TIME_LINE_RE = re.compile(
 )
 
 
+def _line_has_time_marker(line: str) -> bool:
+    return bool(_TIME_LINE_RE.match(line) or _TIME_RE.search(line))
+
+
 def _blocks_from_body_text(body: str, max_blocks: int = 40) -> list[BuyerLeadBlock]:
     """Split full page text into lead chunks when DOM selectors miss cards."""
     if not body or len(body) < 50:
         return []
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+    lines = [
+        ln.strip()
+        for ln in body.splitlines()
+        if ln.strip() and ln.strip().lower() not in _NON_LEAD_SECTION_LINES
+    ]
     blocks: list[BuyerLeadBlock] = []
     i = 0
     while i < len(lines):
-        if not _TIME_LINE_RE.match(lines[i]):
+        if not _line_has_time_marker(lines[i]):
             i += 1
             continue
-        start = max(0, i - 3)
+        start = i
+        lookback = 0
+        while start > 0 and lookback < 3:
+            prev = lines[start - 1]
+            prev_low = prev.lower().strip(" :")
+            if (
+                _line_has_time_marker(prev)
+                or prev_low in _LEAD_BLOCK_BOUNDARY_LINES
+                or prev_low in _NON_LEAD_SECTION_LINES
+                or prev_low in ("recent", "buy leads", "all", "recommended")
+                or prev_low.startswith("category:")
+            ):
+                break
+            start -= 1
+            lookback += 1
+            if _looks_like_product_line(prev):
+                break
         while start < i and (
             _TIME_LINE_RE.match(lines[start])
             or len(lines[start]) < 3
-            or lines[start].lower() in ("recent", "buy leads", "all")
+            or lines[start].lower() in ("recent", "buy leads", "all", "recommended")
         ):
             start += 1
         end = i + 1
-        while end < len(lines) and not _TIME_LINE_RE.match(lines[end]) and end - i < 22:
+        while end < len(lines) and not _line_has_time_marker(lines[end]) and end - i < 22:
             end += 1
         text = "\n".join(lines[start:end])
         if (
@@ -551,6 +614,19 @@ def _blocks_from_body_text(body: str, max_blocks: int = 40) -> list[BuyerLeadBlo
         if len(blocks) >= max_blocks:
             break
     return blocks
+
+
+def _split_candidate_text_into_cards(
+    text: str, selector: str = "raw-split", max_blocks: int = 40
+) -> list[BuyerLeadBlock]:
+    """Recover individual lead cards from broad list/section wrapper text."""
+    if not text:
+        return []
+    time_hits = len(_TIME_RE.findall(text))
+    lower = text.lower()
+    if time_hits <= 1 and not any(line in lower for line in _NON_LEAD_SECTION_LINES):
+        return []
+    return _blocks_from_body_text(text, max_blocks=max_blocks)
 
 
 async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[BuyerLeadBlock]:
@@ -728,11 +804,38 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
     except Exception:
         raw = []
 
-    sorted_raw = sorted(
-        raw or [],
-        key=lambda item: _lead_candidate_score(item.get("text") or ""),
-        reverse=True,
-    )
+    candidates: list[dict[str, object]] = []
+    for item in raw or []:
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        split_blocks = _split_candidate_text_into_cards(
+            text,
+            selector=f"{item.get('selector') or 'raw'}:split",
+            max_blocks=max_blocks,
+        )
+        for block in split_blocks:
+            candidates.append(
+                {
+                    "text": block.text,
+                    "row_index": block.row_index,
+                    "selector": block.selector,
+                }
+            )
+        candidates.append(item)
+
+    def candidate_sort_score(item: dict[str, object]) -> int:
+        text = str(item.get("text") or "")
+        score = _lead_candidate_score(text)
+        time_hits = len(_TIME_RE.findall(text))
+        lower = text.lower()
+        if time_hits > 1:
+            score -= 90 * (time_hits - 1)
+        if any(line in lower for line in _NON_LEAD_SECTION_LINES):
+            score -= 120
+        return score
+
+    sorted_raw = sorted(candidates, key=candidate_sort_score, reverse=True)
     blocks: list[BuyerLeadBlock] = []
     seen_texts: list[str] = []
     for item in sorted_raw:
@@ -740,7 +843,7 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
         if not is_seller_incoming_buy_lead(text):
             continue
         compact = re.sub(r"\s+", " ", text).strip().lower()
-        if any(compact == prev or compact in prev for prev in seen_texts):
+        if any(compact == prev or compact in prev or prev in compact for prev in seen_texts):
             continue
         seen_texts.append(compact)
         blocks.append(
@@ -1506,6 +1609,28 @@ def _apply_panel_text_to_lead(lead: dict[str, str], panel_text: str, block_text:
         lead["buyer_name"] = name
 
 
+def _contact_failure_reason(
+    *,
+    panel_text: str,
+    panel_matches_block: bool,
+    reveal_clicked: bool,
+    contact_signal_seen: bool,
+) -> str:
+    """Short operator-facing reason for a matched lead without phone/email."""
+    panel = (panel_text or "").lower()
+    if not panel_matches_block:
+        return "detail panel did not match clicked lead"
+    if not reveal_clicked:
+        return "contact reveal button not found"
+    if re.search(r"initiated\s+(?:a\s+)?contact|contact\s+initiated", panel):
+        return "IndiaMART says contact was initiated but did not expose phone/email"
+    if "sold out" in panel:
+        return "IndiaMART marked lead sold out before contact was revealed"
+    if contact_signal_seen:
+        return "contact signal appeared but phone/email text could not be parsed"
+    return "contact reveal clicked but phone/email was not visible in page text"
+
+
 async def extract_buyer_details(
     page: Page, block_text: str = "", *, try_reveal_contact: bool = True
 ) -> dict[str, str]:
@@ -1532,6 +1657,12 @@ async def extract_buyer_details(
             "block_title=%r panel_preview=%r",
             _lead_title_for_click(block_text),
             panel_text[:180],
+        )
+        lead["contact_status_reason"] = _contact_failure_reason(
+            panel_text=panel_text,
+            panel_matches_block=False,
+            reveal_clicked=False,
+            contact_signal_seen=False,
         )
 
     # Extract better product title from panel text if available
@@ -1583,10 +1714,16 @@ async def extract_buyer_details(
             lead["buyer_name"] = dom_contact["buyer_name"]
 
     if try_reveal_contact and not lead_has_buyer_contact(lead):
+        reveal_clicked = False
+        contact_signal_seen = False
         for attempt in range(2):
             clicked_any = await reveal_indiamart_buyer_contact(page)
+            reveal_clicked = reveal_clicked or clicked_any
             if clicked_any:
-                await _wait_for_contact_signal(page, timeout_ms=4000)
+                contact_signal_seen = (
+                    await _wait_for_contact_signal(page, timeout_ms=4000)
+                    or contact_signal_seen
+                )
             # Re-scrape after reveal attempt regardless of click outcome
             panel_text = await _read_detail_panel_text(page)
             panel_matches_block = _panel_matches_block(panel_text, block_text)
@@ -1611,6 +1748,13 @@ async def extract_buyer_details(
             if not clicked_any:
                 logger.warning("Contact reveal button not found, attempt %d/2", attempt + 1)
                 break
+        if not lead_has_buyer_contact(lead):
+            lead["contact_status_reason"] = _contact_failure_reason(
+                panel_text=panel_text,
+                panel_matches_block=panel_matches_block,
+                reveal_clicked=reveal_clicked,
+                contact_signal_seen=contact_signal_seen,
+            )
 
     if panel_matches_block and not lead.get("message") and panel_text:
         for line in panel_text.splitlines():

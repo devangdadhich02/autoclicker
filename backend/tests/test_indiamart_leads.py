@@ -6,6 +6,7 @@ from app.automation.indiamart_leads import (
     _lead_title_for_click,
     _panel_matches_block,
     _parse_address_from_text,
+    _split_candidate_text_into_cards,
     is_buyer_inquiry_block,
     is_plausible_buyer_phone,
     is_weak_match_context,
@@ -231,6 +232,42 @@ def test_body_split_finds_laser_leads():
     blocks = _blocks_from_body_text(body)
     assert len(blocks) >= 2
     assert any("Laser Welding" in b.text for b in blocks)
+
+
+def test_body_split_finds_jammu_kashmir_lead_with_section_header():
+    body = (
+        "Recommended\nLaser Welding Machine\nNo relevant BuyLeads found\n"
+        "Showing other leads you may like\n"
+        "1.5 kW Fiber Laser Welding Machine\n"
+        "Srinagar, Jammu & Kashmir 16 mins ago\n"
+        "Phone WhatsApp\n"
+        "Category: Laser Welding Machine\n"
+        "Laser Power : 1.5 kW\n"
+        "Requirement Type : Business Use"
+    )
+    blocks = _blocks_from_body_text(body)
+    assert len(blocks) == 1
+    assert "1.5 kW Fiber Laser Welding Machine" in blocks[0].text
+    assert "No relevant BuyLeads found" not in blocks[0].text
+    assert _parse_address_from_text(blocks[0].text) == "Srinagar, Jammu & Kashmir"
+    assert is_buyer_inquiry_block(blocks[0].text)
+
+
+def test_raw_wrapper_split_keeps_irrelevant_bamboo_card_separate():
+    raw = (
+        "Laser Welding Machine\nCoorg, Karnataka\n3 mins ago\n"
+        "Category: Laser Welding Machine\nI am Interested\n"
+        "Sumit, Indore\n6 mins ago\n"
+        "Bamboo Laser Cutting & Engraving Machine, Cooling System\n"
+        "I am Interested"
+    )
+    blocks = _split_candidate_text_into_cards(raw)
+    assert len(blocks) == 2
+    bamboo = next(b for b in blocks if "Bamboo" in b.text)
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(bamboo.text), [make_keyword("Laser welding machine")]
+    )
+    assert results == []
 
 
 def test_detects_logged_out_seller_landing():
