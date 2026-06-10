@@ -958,7 +958,20 @@ async def ensure_bltxn_leads_page(
                 logger.info(f"After sidebar click - has_time_ago: {has_time_ago}, body_length: {len(body)}")
                 
                 if has_time_ago:
-                    # SPA loaded successfully
+                    # SPA loaded successfully. Try to put the tab on Recent without
+                    # doing a hard URL reload, because direct bltxn navigation can
+                    # leave IndiaMART stuck on a nav-only shell.
+                    recent_clicked = await click_recent_buy_leads_tab(page)
+                    logger.info(
+                        "Recent tab clicked after sidebar recovery: %s",
+                        recent_clicked,
+                    )
+                    if recent_clicked:
+                        await page.wait_for_timeout(1000)
+                        refreshed_body = await read_indiamart_page_text(page, 4_000)
+                        if bool(_TIME_AGO_RE.search(refreshed_body)):
+                            body = refreshed_body
+                            has_time_ago = True
                     await scroll_lead_list(page)
                     break
 
@@ -1000,19 +1013,26 @@ async def ensure_bltxn_leads_page(
             await asyncio.sleep(3)
 
     final_url = (page.url or "").lower()
+    final_body = await read_indiamart_page_text(page, 8_000)
+    final_has_time = bool(_TIME_AGO_RE.search(final_body))
     if _is_non_recent_buy_leads_url(final_url):
-        logger.info("Final URL is not Recent, forcing recent before returning")
-        try:
-            await page.goto(target, wait_until="domcontentloaded", timeout=12_000)
-            await page.wait_for_timeout(800)
-            await beat()
-        except Exception:
-            pass
+        if final_has_time:
+            logger.info(
+                "Final URL is not Recent but buyer rows are visible; preserving SPA content"
+            )
+        else:
+            logger.info("Final URL is not Recent, forcing recent before returning")
+            try:
+                await page.goto(target, wait_until="domcontentloaded", timeout=12_000)
+                await page.wait_for_timeout(800)
+                await beat()
+            except Exception:
+                pass
+            final_body = await read_indiamart_page_text(page, 8_000)
+            final_has_time = bool(_TIME_AGO_RE.search(final_body))
 
     await scroll_lead_list(page)
 
-    final_body = await read_indiamart_page_text(page, 8_000)
-    final_has_time = bool(_TIME_AGO_RE.search(final_body))
     logger.info(f"ensure_bltxn_leads_page complete - final_has_time: {final_has_time}")
 
 
