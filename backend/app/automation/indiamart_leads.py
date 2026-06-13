@@ -629,9 +629,12 @@ def _split_candidate_text_into_cards(
     return _blocks_from_body_text(text, max_blocks=max_blocks)
 
 
-async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[BuyerLeadBlock]:
-    await _wait_for_lead_feed(page)
-    await scroll_lead_list(page, aggressive=True)
+async def collect_buyer_lead_blocks(
+    page: Page, max_blocks: int = 40, *, visible_only: bool = False
+) -> list[BuyerLeadBlock]:
+    await _wait_for_lead_feed(page, timeout_ms=1_800 if visible_only else 6_000)
+    if not visible_only:
+        await scroll_lead_list(page, aggressive=True)
 
     script = """
     async (config) => {
@@ -761,14 +764,17 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
         return false;
       };
 
-      scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
-      window.scrollTo(0, 0);
-      await sleep(200);
+      if (!config.visibleOnly) {
+        scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
+        window.scrollTo(0, 0);
+        await sleep(200);
+      }
 
       let stagnant = 0;
-      const maxSteps = 12;
+      const maxSteps = config.visibleOnly ? 1 : 12;
       for (let step = 0; step < maxSteps && out.length < maxBlocks * 4; step += 1) {
         sampleVisibleRows(`scan-${step}`);
+        if (config.visibleOnly) break;
         if (step > 0 && step % 6 === 0) await clickLoadMore();
 
         let moved = false;
@@ -789,9 +795,11 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
         if (stagnant >= 3) break;
       }
 
-      sampleVisibleRows('scan-final');
-      scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
-      window.scrollTo(0, 0);
+      if (!config.visibleOnly) {
+        sampleVisibleRows('scan-final');
+        scrollRoots.forEach(root => { try { root.scrollTop = 0; } catch (e) {} });
+        window.scrollTo(0, 0);
+      }
       return out;
     }
     """
@@ -799,7 +807,11 @@ async def collect_buyer_lead_blocks(page: Page, max_blocks: int = 40) -> list[Bu
     try:
         raw = await page.evaluate(
             script,
-            {"selectors": INQUIRY_ROW_SELECTORS, "maxBlocks": max_blocks},
+            {
+                "selectors": INQUIRY_ROW_SELECTORS,
+                "maxBlocks": max_blocks,
+                "visibleOnly": visible_only,
+            },
         )
     except Exception:
         raw = []
@@ -1534,13 +1546,43 @@ def _product_context_words(text: str) -> list[str]:
     return out
 
 
-def _panel_matches_block(panel_text: str, block_text: str) -> bool:
+def _normalized_panel_text(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _panel_changed_enough(before: str, after: str) -> bool:
+    prev = _normalized_panel_text(before)
+    cur = _normalized_panel_text(after)
+    if not prev:
+        return True
+    if not cur or prev == cur:
+        return False
+    if len(cur) > 80 and (cur in prev or prev in cur):
+        return False
+    return True
+
+
+def _panel_has_contact_card(text: str) -> bool:
+    if not text:
+        return False
+    has_contact = bool(_PHONE_RE.search(text) or _EMAIL_RE.search(text))
+    if not has_contact:
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    has_nameish = bool(_extract_name_from_panel_top(text) or _parse_name_from_panel(text))
+    return has_nameish or len(lines) <= 20
+
+
+def _panel_matches_block(
+    panel_text: str, block_text: str, *, stale_panel_text: str = ""
+) -> bool:
     """True when the open detail/contact panel still appears to be the clicked row."""
     if not block_text:
         return True
     panel = (panel_text or "").lower()
     if not panel or len(panel) < 40:
         return False
+    panel_changed = _panel_changed_enough(stale_panel_text, panel_text)
 
     title = _lead_title_for_click(block_text)
     title_words = _product_context_words(title)
@@ -1551,7 +1593,13 @@ def _panel_matches_block(panel_text: str, block_text: str) -> bool:
 
     hits = [word for word in title_words if re.search(rf"\b{re.escape(word)}\b", panel)]
     needed = min(len(title_words), 2)
-    return len(hits) >= needed
+    if len(hits) >= needed:
+        return True
+
+    # IndiaMART's response popup can show buyer name/email/phone in the left rail while
+    # the message area contains seller product/template text, not the buy-lead title.
+    # Accept that contact card only when it is freshly opened after the row click.
+    return bool(stale_panel_text) and panel_changed and _panel_has_contact_card(panel_text)
 
 
 def _extract_name_from_panel_top(panel_text: str) -> str:
@@ -1632,7 +1680,11 @@ def _contact_failure_reason(
 
 
 async def extract_buyer_details(
-    page: Page, block_text: str = "", *, try_reveal_contact: bool = True
+    page: Page,
+    block_text: str = "",
+    *,
+    try_reveal_contact: bool = True,
+    stale_panel_text: str = "",
 ) -> dict[str, str]:
     """Open inquiry detail panel, click contact reveal, extract name/phone."""
     lead: dict[str, str] = {}
@@ -1648,7 +1700,9 @@ async def extract_buyer_details(
             lead["buyer_address"] = lead.get("buyer_location", "")
 
     panel_text = await _read_detail_panel_text(page)
-    panel_matches_block = _panel_matches_block(panel_text, block_text)
+    panel_matches_block = _panel_matches_block(
+        panel_text, block_text, stale_panel_text=stale_panel_text
+    )
     if panel_matches_block:
         _apply_panel_text_to_lead(lead, panel_text, block_text)
     elif block_text:
@@ -1726,7 +1780,9 @@ async def extract_buyer_details(
                 )
             # Re-scrape after reveal attempt regardless of click outcome
             panel_text = await _read_detail_panel_text(page)
-            panel_matches_block = _panel_matches_block(panel_text, block_text)
+            panel_matches_block = _panel_matches_block(
+                panel_text, block_text, stale_panel_text=stale_panel_text
+            )
             if panel_matches_block:
                 _apply_panel_text_to_lead(lead, panel_text, block_text)
                 dom_contact = await _scrape_contact_from_dom(page)

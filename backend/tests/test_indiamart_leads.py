@@ -315,6 +315,9 @@ def test_rejects_stale_detail_panel_for_different_lead_title():
         "NC-Scriber/Lettering Machine and Drafting Aid"
     )
     assert not _panel_matches_block(stale_panel, block)
+    assert not _panel_matches_block(
+        stale_panel, block, stale_panel_text=stale_panel
+    )
 
 
 def test_accepts_matching_detail_panel_for_clicked_lead_title():
@@ -327,6 +330,26 @@ def test_accepts_matching_detail_panel_for_clicked_lead_title():
     )
     panel = "Laser Marking Machine\nGurugram, Haryana\nPhone 9876543210"
     assert _panel_matches_block(panel, block)
+
+
+def test_accepts_fresh_contact_popup_without_product_title():
+    block = (
+        "CO2 Laser Cutting Machine\n"
+        "Ludhiana, Punjab\n"
+        "42 mins ago\n"
+        "Category: CO2 Laser Cutting Machine\n"
+        "Requirement Type: Business Use"
+    )
+    stale = "Lead Manager\nRecent Buy Leads\nCO2 Laser Cutting Machine"
+    panel = (
+        "Jahir\n"
+        "arjh2251@gmail.com\n"
+        "Member Since :\n"
+        "+91-9345441416\n"
+        "Hi Jahir,\n"
+        "Greetings from Laser Lab (India) Private Limited."
+    )
+    assert _panel_matches_block(panel, block, stale_panel_text=stale)
 
 
 def test_accepts_just_now_feed_row():

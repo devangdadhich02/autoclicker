@@ -200,6 +200,14 @@ class BrowserManager:
             await self.launch()
         return self._page  # type: ignore[return-value]
 
+    async def new_page(self) -> Page:
+        """Open an extra page in the same logged-in browser context."""
+        if not self.is_alive:
+            await self.launch()
+        if self._context is None:
+            raise BrowserError("Browser context is not available")
+        return await self._context.new_page()
+
     async def navigate(
         self,
         url: str,

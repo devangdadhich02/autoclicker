@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import random
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,6 +14,7 @@ from app.automation.browser_manager import BrowserManager
 from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
     BuyerLeadBlock,
+    _read_detail_panel_text,
     click_buyer_lead_block,
     collect_buyer_lead_blocks,
     extract_buyer_details,
@@ -70,6 +73,34 @@ _LOGIN_PAGE_TEXT_PATTERNS = [
 logger = get_logger(__name__)
 
 
+@dataclass
+class QueuedIndiaMartLead:
+    block: BuyerLeadBlock
+    keyword_id: str
+    keyword_value: str
+    priority: int
+    score: float
+    fingerprint: str
+    queued_at: datetime
+
+
+class PageScopedBrowser:
+    """Tiny ActionEngine adapter so action rules run on the action page, not scanner page."""
+
+    def __init__(self, base: BrowserManager, page: Any) -> None:
+        self._base = base
+        self._page = page
+
+    async def get_page(self) -> Any:
+        return self._page
+
+    async def screenshot(self, label: str = "") -> Any:
+        return await self._base.screenshot(label)
+
+    async def navigate(self, url: str) -> None:
+        await self._page.goto(url, wait_until="domcontentloaded")
+
+
 def _indiamart_recent_leads_url(target_url: str | None = None) -> str:
     """Always scan the Recent Buy Leads feed, even if a saved job still says relevant."""
     target = (target_url or "").lower()
@@ -108,6 +139,11 @@ class JobRunner:
         self._seen_lead_fingerprints: set[str] = set()
         self._partial_contact_retry_until: dict[str, datetime] = {}
         self._layout_alert_keys: set[str] = set()
+        self._last_deep_indiamart_scan_at: datetime | None = None
+        self._indiamart_lead_queue: list[QueuedIndiaMartLead] = []
+        self._queued_lead_fingerprints: set[str] = set()
+        self._indiamart_action_task: asyncio.Task[Any] | None = None
+        self._indiamart_action_lock = asyncio.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -164,6 +200,11 @@ class JobRunner:
                     break
 
                 self._poll_interval = job.poll_interval_seconds
+                if is_indiamart_seller_url(job.target_url):
+                    self._poll_interval = min(
+                        float(job.poll_interval_seconds),
+                        settings.INDIAMART_FAST_SCAN_INTERVAL_SECONDS,
+                    )
                 # Heartbeat before slow navigation so watchdog does not kill the job
                 await self._heartbeat()
 
@@ -349,12 +390,26 @@ class JobRunner:
                 target_url=leads_url,
                 url=page.url,
             )
-        blocks = await collect_buyer_lead_blocks(page, max_blocks=25)
+        now = datetime.now(UTC)
+        deep_scan_due = (
+            self._last_deep_indiamart_scan_at is None
+            or (
+                now - self._last_deep_indiamart_scan_at
+            ).total_seconds() >= settings.INDIAMART_DEEP_SCAN_INTERVAL_SECONDS
+        )
+        blocks = await collect_buyer_lead_blocks(
+            page,
+            max_blocks=25 if deep_scan_due else 12,
+            visible_only=not deep_scan_due,
+        )
+        if deep_scan_due:
+            self._last_deep_indiamart_scan_at = now
         if not blocks:
             # Single consolidated re-navigation attempt
             leads_url = _indiamart_recent_leads_url(job.target_url)
             await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
             blocks = await collect_buyer_lead_blocks(page, max_blocks=25)
+            self._last_deep_indiamart_scan_at = datetime.now(UTC)
         if not blocks:
             diag = ""
             snippet = ""
@@ -441,40 +496,40 @@ class JobRunner:
                 keywords=[(k.value or "")[:80] for k in keywords[:20]],
                 url=page_url,
             )
+            self._ensure_indiamart_action_worker(browser, job, keywords, action_rules)
             return
 
         matches.sort(key=lambda m: (m[1].priority, m[1].score), reverse=True)
-        leads_url = _indiamart_recent_leads_url(job.target_url)
+        queued = self._enqueue_indiamart_matches(matches, keywords)
+        if queued:
+            logger.info(
+                "Matched IndiaMART leads queued",
+                job_id=self.job_id,
+                queued=queued,
+                queue_size=len(self._indiamart_lead_queue),
+            )
+        self._ensure_indiamart_action_worker(browser, job, keywords, action_rules)
 
-        captured = 0
-        partial_saved = 0
+    def _enqueue_indiamart_matches(
+        self,
+        matches: list[tuple[BuyerLeadBlock, Any]],
+        keywords: list[Keyword],
+    ) -> int:
+        queued = 0
         for block, result in matches[:_MAX_LEADS_PER_SCAN]:
-            await self._heartbeat()
             pre_fp = lead_fingerprint(block.text, {})
             if pre_fp in self._seen_lead_fingerprints:
-                logger.info(
-                    "Duplicate lead skipped (already captured)",
-                    job_id=self.job_id,
-                    keyword=result.keyword_value,
-                    fingerprint=pre_fp,
-                )
                 continue
-
+            if pre_fp in self._queued_lead_fingerprints:
+                continue
             retry_until = self._partial_contact_retry_until.get(pre_fp)
             if retry_until and retry_until > datetime.now(UTC):
-                logger.info(
-                    "Partial lead contact retry cooling down",
-                    job_id=self.job_id,
-                    keyword=result.keyword_value,
-                    fingerprint=pre_fp,
-                    retry_at=retry_until.isoformat(),
-                )
                 continue
             if retry_until:
                 self._partial_contact_retry_until.pop(pre_fp, None)
 
             click_match_text = lead_match_text(block.text)
-            click_guard = DetectionEngine(f"{self.job_id}:click_guard")
+            click_guard = DetectionEngine(f"{self.job_id}:queue_guard")
             click_results = click_guard.evaluate(click_match_text, keywords)
             click_result = next(
                 (
@@ -487,190 +542,328 @@ class JobRunner:
             )
             if not click_result:
                 logger.warning(
-                    "Matched row skipped before click — keyword no longer validates",
+                    "Matched row skipped before queue — keyword no longer validates",
                     job_id=self.job_id,
                     keyword=result.keyword_value,
                     match_text=click_match_text[:300],
                     block_preview=block.text[:300],
                 )
                 continue
-            result = click_result
 
-            if captured > 0:
-                # Navigate back to feed after detail panel - lightweight vs full re-nav
+            self._indiamart_lead_queue.append(
+                QueuedIndiaMartLead(
+                    block=block,
+                    keyword_id=click_result.keyword_id,
+                    keyword_value=click_result.keyword_value,
+                    priority=click_result.priority,
+                    score=click_result.score,
+                    fingerprint=pre_fp,
+                    queued_at=datetime.now(UTC),
+                )
+            )
+            self._queued_lead_fingerprints.add(pre_fp)
+            queued += 1
+
+        self._indiamart_lead_queue.sort(
+            key=lambda item: (item.priority, item.score, item.queued_at.timestamp()),
+            reverse=True,
+        )
+        return queued
+
+    def _ensure_indiamart_action_worker(
+        self,
+        browser: BrowserManager,
+        job: AutomationJob,
+        keywords: list[Keyword],
+        action_rules: list[ActionRule],
+    ) -> None:
+        if not self._indiamart_lead_queue:
+            return
+        if self._indiamart_action_task and not self._indiamart_action_task.done():
+            return
+        self._indiamart_action_task = asyncio.create_task(
+            self._drain_indiamart_lead_queue(browser, job, keywords, action_rules),
+            name=f"indiamart_action_{self.job_id}",
+        )
+        self._indiamart_action_task.add_done_callback(self._on_indiamart_action_done)
+
+    def _on_indiamart_action_done(self, task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            logger.info("IndiaMART action worker cancelled", job_id=self.job_id)
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "IndiaMART action worker failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+
+    async def _drain_indiamart_lead_queue(
+        self,
+        browser: BrowserManager,
+        job: AutomationJob,
+        keywords: list[Keyword],
+        action_rules: list[ActionRule],
+    ) -> None:
+        async with self._indiamart_action_lock:
+            page = await browser.new_page()
+            leads_url = _indiamart_recent_leads_url(job.target_url)
+            try:
+                await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+                while self._indiamart_lead_queue and not self._shutdown_event.is_set():
+                    item = self._indiamart_lead_queue.pop(0)
+                    self._queued_lead_fingerprints.discard(item.fingerprint)
+                    await self._process_queued_indiamart_lead(
+                        page, item, job, keywords, action_rules, browser, leads_url
+                    )
+                    await self._heartbeat()
+            finally:
                 try:
-                    await page.go_back(timeout=10_000, wait_until="domcontentloaded")
+                    await page.close()
                 except Exception:
                     pass
-                await scroll_lead_list(page)
 
-            clicked = await click_buyer_lead_block(page, block)
-            if not clicked:
-                logger.warning(
-                    "Could not open matched buyer row — using feed text only",
-                    job_id=self.job_id,
-                    keyword=result.keyword_value,
-                )
-
-            await self._heartbeat()
-            lead = await extract_buyer_details(page, block.text)
-            await self._heartbeat()
-            if not lead_has_buyer_contact(lead):
-                logger.warning(
-                    "Buyer phone/email not revealed — lead saved as partial",
-                    job_id=self.job_id,
-                    keyword=result.keyword_value,
-                    row_clicked=clicked,
-                )
-                # Persist partial lead so matched inquiries stay visible in Vellora
-                # while contact-reveal diagnostics explain why phone/email is blank.
-                partial_fp = f"partial:{pre_fp}"
-                retry_at = datetime.now(UTC) + timedelta(
-                    seconds=_PARTIAL_CONTACT_RETRY_SECONDS
-                )
-                self._partial_contact_retry_until[pre_fp] = retry_at
-                contact_reason = lead.get(
-                    "contact_status_reason",
-                    "contact not revealed on IndiaMART",
-                )
-                if partial_fp not in self._seen_lead_fingerprints:
-                    self._seen_lead_fingerprints.add(partial_fp)
-                    partial_details = {
-                        **lead,
-                        "keyword": result.keyword_value,
-                        "context_snippet": block.text[:500],
-                        "page_url": page_url,
-                        "lead_fingerprint": partial_fp,
-                        "contact_revealed": False,
-                        "next_contact_retry_at": retry_at.isoformat(),
-                    }
-                    partial_msg = (
-                        f"Partial buyer lead — {lead.get('product_title', result.keyword_value)} | "
-                        f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
-                        f"Contact not revealed: {contact_reason}"
-                    )
-                    if not partial_details.get("message"):
-                        partial_details["message"] = partial_msg
-                    await self._increment_lead()
-                    await self._log_event(
-                        "lead_extracted",
-                        partial_msg,
-                        EventSeverity.warning,
-                        keyword_matched=result.keyword_value,
-                        details=partial_details,
-                        job_name=job.name,
-                        page_url=page_url,
-                    )
-                    partial_saved += 1
-                diagnostic_details = await self._capture_indiamart_diagnostics(
-                    page,
-                    f"contact_not_revealed_{pre_fp[:32]}",
-                )
-                await self._log_event(
-                    "contact_not_revealed",
-                    f"Matched '{result.keyword_value}' but could not reveal buyer contact. "
-                    "Open lead manually on IndiaMART or check Buy Lead credits. "
-                    f"Auto retry after {retry_at.isoformat()}.",
-                    EventSeverity.warning,
-                    keyword_matched=result.keyword_value,
-                    details={
-                        "block_preview": block.text[:500],
-                        "extracted": lead,
-                        "row_clicked": clicked,
-                        "contact_status_reason": contact_reason,
-                        "next_contact_retry_at": retry_at.isoformat(),
-                        "diagnostic": diagnostic_details,
-                    },
-                    job_name=job.name,
-                    page_url=page_url,
-                    screenshot_path=diagnostic_details.get("screenshot_path"),
-                )
-                continue
-            if not lead_record_is_complete(block.text, lead):
-                logger.warning(
-                    "Matched row rejected — not a complete buyer lead",
-                    job_id=self.job_id,
-                    keyword=result.keyword_value,
-                    block_preview=block.text[:200],
-                    has_phone=bool(lead.get("buyer_phone")),
-                    has_name=bool(lead.get("buyer_name")),
-                )
-                await self._log_event(
-                    "lead_rejected",
-                    f"Keyword '{result.keyword_value}' matched page text but buyer details missing.",
-                    EventSeverity.warning,
-                    keyword_matched=result.keyword_value,
-                    details={
-                        "block_preview": block.text[:500],
-                        "extracted": lead,
-                    },
-                    job_name=job.name,
-                    page_url=page_url,
-                )
-                continue
-
-            fp = lead_fingerprint(block.text, lead)
-            if fp in self._seen_lead_fingerprints:
-                logger.info(
-                    "Duplicate lead skipped after contact extract",
-                    job_id=self.job_id,
-                    fingerprint=fp,
-                )
-                continue
-            self._seen_lead_fingerprints.add(fp)
-
-            details = {
-                **lead,
-                "keyword": result.keyword_value,
-                "context_snippet": block.text[:500],
-                "page_url": page_url,
-                "lead_fingerprint": fp,
-                "contact_revealed": True,
-            }
-            msg = (
-                f"Buyer lead — {lead.get('product_title', result.keyword_value)} | "
-                f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
-                f"Phone: {lead.get('buyer_phone', 'N/A')} | "
-                f"Name: {lead.get('buyer_name', 'N/A')}"
-            )
+    async def _process_queued_indiamart_lead(
+        self,
+        page: Any,
+        item: QueuedIndiaMartLead,
+        job: AutomationJob,
+        keywords: list[Keyword],
+        action_rules: list[ActionRule],
+        browser: BrowserManager,
+        leads_url: str,
+    ) -> None:
+        captured = 0
+        partial_saved = 0
+        block = item.block
+        pre_fp = item.fingerprint
+        if pre_fp in self._seen_lead_fingerprints:
             logger.info(
-                "Real buyer lead captured",
+                "Duplicate queued lead skipped",
                 job_id=self.job_id,
-                keyword=result.keyword_value,
-                phone=lead.get("buyer_phone"),
-                product=lead.get("product_title"),
-                name=lead.get("buyer_name"),
+                keyword=item.keyword_value,
+                fingerprint=pre_fp,
             )
-            await self._increment_lead()
-            await self._log_event(
-                "lead_extracted",
-                msg,
-                EventSeverity.info,
-                keyword_matched=result.keyword_value,
-                details=details,
-                job_name=job.name,
-                page_url=page_url,
-            )
-            captured += 1
+            return
 
-            if action_rules:
-                action_engine = ActionEngine(self.job_id, browser)
-                action_engine._last_lead_data = lead
-                exec_results = await action_engine.execute_chain(action_rules)
-                success_count = sum(exec_results)
-                await self._increment_action(success_count)
+        retry_until = self._partial_contact_retry_until.get(pre_fp)
+        if retry_until and retry_until > datetime.now(UTC):
+            logger.info(
+                "Queued partial lead contact retry cooling down",
+                job_id=self.job_id,
+                keyword=item.keyword_value,
+                fingerprint=pre_fp,
+                retry_at=retry_until.isoformat(),
+            )
+            return
+        if retry_until:
+            self._partial_contact_retry_until.pop(pre_fp, None)
+
+        click_match_text = lead_match_text(block.text)
+        click_guard = DetectionEngine(f"{self.job_id}:action_guard")
+        click_results = click_guard.evaluate(click_match_text, keywords)
+        click_result = next(
+            (
+                r
+                for r in click_results
+                if r.keyword_id == item.keyword_id
+                and not is_weak_match_context(r.context_snippet, r.keyword_value)
+            ),
+            None,
+        )
+        if not click_result:
+            logger.warning(
+                "Queued row skipped before click — keyword no longer validates",
+                job_id=self.job_id,
+                keyword=item.keyword_value,
+                match_text=click_match_text[:300],
+                block_preview=block.text[:300],
+            )
+            return
+
+        await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+        await scroll_lead_list(page)
+        try:
+            stale_panel_text = await _read_detail_panel_text(page)
+        except Exception:
+            stale_panel_text = ""
+
+        clicked = await click_buyer_lead_block(page, block)
+        if not clicked:
+            logger.warning(
+                "Could not open queued matched buyer row — using feed text only",
+                job_id=self.job_id,
+                keyword=item.keyword_value,
+            )
+
+        await self._heartbeat()
+        lead = await extract_buyer_details(
+            page, block.text, stale_panel_text=stale_panel_text
+        )
+        await self._heartbeat()
+        if not lead_has_buyer_contact(lead):
+            logger.warning(
+                "Buyer phone/email not revealed — queued lead saved as partial",
+                job_id=self.job_id,
+                keyword=item.keyword_value,
+                row_clicked=clicked,
+            )
+            partial_fp = f"partial:{pre_fp}"
+            retry_at = datetime.now(UTC) + timedelta(
+                seconds=_PARTIAL_CONTACT_RETRY_SECONDS
+            )
+            self._partial_contact_retry_until[pre_fp] = retry_at
+            contact_reason = lead.get(
+                "contact_status_reason",
+                "contact not revealed on IndiaMART",
+            )
+            if partial_fp not in self._seen_lead_fingerprints:
+                self._seen_lead_fingerprints.add(partial_fp)
+                partial_details = {
+                    **lead,
+                    "keyword": item.keyword_value,
+                    "context_snippet": block.text[:500],
+                    "page_url": leads_url,
+                    "lead_fingerprint": partial_fp,
+                    "contact_revealed": False,
+                    "next_contact_retry_at": retry_at.isoformat(),
+                    "queue_wait_seconds": (
+                        datetime.now(UTC) - item.queued_at
+                    ).total_seconds(),
+                }
+                partial_msg = (
+                    f"Partial buyer lead — {lead.get('product_title', item.keyword_value)} | "
+                    f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
+                    f"Contact not revealed: {contact_reason}"
+                )
+                if not partial_details.get("message"):
+                    partial_details["message"] = partial_msg
+                await self._increment_lead()
+                await self._log_event(
+                    "lead_extracted",
+                    partial_msg,
+                    EventSeverity.warning,
+                    keyword_matched=item.keyword_value,
+                    details=partial_details,
+                    job_name=job.name,
+                    page_url=leads_url,
+                )
+                partial_saved += 1
+            diagnostic_details = await self._capture_indiamart_diagnostics(
+                page,
+                f"contact_not_revealed_{pre_fp[:32]}",
+            )
+            await self._log_event(
+                "contact_not_revealed",
+                f"Matched '{item.keyword_value}' but could not reveal buyer contact. "
+                "Open lead manually on IndiaMART or check Buy Lead credits. "
+                f"Auto retry after {retry_at.isoformat()}.",
+                EventSeverity.warning,
+                keyword_matched=item.keyword_value,
+                details={
+                    "block_preview": block.text[:500],
+                    "extracted": lead,
+                    "row_clicked": clicked,
+                    "contact_status_reason": contact_reason,
+                    "next_contact_retry_at": retry_at.isoformat(),
+                    "diagnostic": diagnostic_details,
+                },
+                job_name=job.name,
+                page_url=leads_url,
+                screenshot_path=diagnostic_details.get("screenshot_path"),
+            )
+            return
+        if not lead_record_is_complete(block.text, lead):
+            logger.warning(
+                "Queued row rejected — not a complete buyer lead",
+                job_id=self.job_id,
+                keyword=item.keyword_value,
+                block_preview=block.text[:200],
+                has_phone=bool(lead.get("buyer_phone")),
+                has_name=bool(lead.get("buyer_name")),
+            )
+            await self._log_event(
+                "lead_rejected",
+                f"Keyword '{item.keyword_value}' matched page text but buyer details missing.",
+                EventSeverity.warning,
+                keyword_matched=item.keyword_value,
+                details={
+                    "block_preview": block.text[:500],
+                    "extracted": lead,
+                },
+                job_name=job.name,
+                page_url=leads_url,
+            )
+            return
+
+        fp = lead_fingerprint(block.text, lead)
+        if fp in self._seen_lead_fingerprints:
+            logger.info(
+                "Duplicate queued lead skipped after contact extract",
+                job_id=self.job_id,
+                fingerprint=fp,
+            )
+            self._seen_lead_fingerprints.add(pre_fp)
+            return
+        self._seen_lead_fingerprints.add(pre_fp)
+        self._seen_lead_fingerprints.add(fp)
+
+        details = {
+            **lead,
+            "keyword": item.keyword_value,
+            "context_snippet": block.text[:500],
+            "page_url": leads_url,
+            "lead_fingerprint": fp,
+            "contact_revealed": True,
+            "queue_wait_seconds": (datetime.now(UTC) - item.queued_at).total_seconds(),
+        }
+        msg = (
+            f"Buyer lead — {lead.get('product_title', item.keyword_value)} | "
+            f"{lead.get('buyer_address') or lead.get('buyer_location', '')} | "
+            f"Phone: {lead.get('buyer_phone', 'N/A')} | "
+            f"Name: {lead.get('buyer_name', 'N/A')}"
+        )
+        logger.info(
+            "Real queued buyer lead captured",
+            job_id=self.job_id,
+            keyword=item.keyword_value,
+            phone=lead.get("buyer_phone"),
+            product=lead.get("product_title"),
+            name=lead.get("buyer_name"),
+        )
+        await self._increment_lead()
+        await self._log_event(
+            "lead_extracted",
+            msg,
+            EventSeverity.info,
+            keyword_matched=item.keyword_value,
+            details=details,
+            job_name=job.name,
+            page_url=leads_url,
+        )
+        captured += 1
+
+        if action_rules:
+            action_engine = ActionEngine(
+                self.job_id,
+                PageScopedBrowser(browser, page),  # type: ignore[arg-type]
+            )
+            action_engine._last_lead_data = lead
+            exec_results = await action_engine.execute_chain(action_rules)
+            success_count = sum(exec_results)
+            await self._increment_action(success_count)
 
         if captured == 0 and partial_saved == 0:
             logger.info(
-                "No new leads saved this scan (duplicates or contact not revealed)",
+                "No new leads saved from queued item",
                 job_id=self.job_id,
-                matched_rows=len(matches),
+                keyword=item.keyword_value,
             )
         elif captured == 0 and partial_saved > 0:
             logger.info(
-                "Partial leads saved this scan (contact not revealed)",
+                "Partial queued lead saved (contact not revealed)",
                 job_id=self.job_id,
-                matched_rows=len(matches),
                 partial_saved=partial_saved,
             )
 
@@ -868,6 +1061,8 @@ class JobRunner:
     async def _maybe_recycle_browser(self) -> None:
         if self._browser_created_at is None:
             return
+        if self._indiamart_action_task and not self._indiamart_action_task.done():
+            return
         elapsed_hours = (datetime.now(UTC) - self._browser_created_at).total_seconds() / 3600
         if elapsed_hours >= settings.BROWSER_RECYCLE_INTERVAL_HOURS:
             logger.info("Recycling browser (interval reached)", job_id=self.job_id)
@@ -1026,6 +1221,10 @@ class JobRunner:
 
     async def _cleanup(self) -> None:
         self._is_running = False
+        if self._indiamart_action_task and not self._indiamart_action_task.done():
+            self._indiamart_action_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._indiamart_action_task
         if self._browser:
             await self._browser.close()
             self._browser = None
