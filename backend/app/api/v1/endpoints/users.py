@@ -10,7 +10,7 @@ from app.services.user_service import UserService
 router = APIRouter()
 
 
-@router.get("", response_model=list[UserResponse])
+@router.get("/api/v1/users", response_model=list[UserResponse])
 async def list_users(
     db: DbSession,
     _admin: AdminUser,
@@ -22,7 +22,7 @@ async def list_users(
     return [UserResponse.model_validate(u) for u in users]
 
 
-@router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/api/v1/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(body: UserCreate, db: DbSession, _admin: AdminUser) -> UserResponse:
     svc = UserService(db)
     try:
@@ -37,7 +37,7 @@ async def create_user(body: UserCreate, db: DbSession, _admin: AdminUser) -> Use
     return UserResponse.model_validate(user)
 
 
-@router.get("/{user_id}", response_model=UserResponse)
+@router.get("/api/v1/users/{user_id}", response_model=UserResponse)
 async def get_user(user_id: str, db: DbSession, _admin: AdminUser) -> UserResponse:
     svc = UserService(db)
     try:
@@ -47,7 +47,7 @@ async def get_user(user_id: str, db: DbSession, _admin: AdminUser) -> UserRespon
     return UserResponse.model_validate(user)
 
 
-@router.patch("/{user_id}", response_model=UserResponse)
+@router.patch("/api/v1/users/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: str, body: UserUpdate, db: DbSession, _admin: AdminUser
 ) -> UserResponse:

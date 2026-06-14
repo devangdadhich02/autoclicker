@@ -9,7 +9,7 @@ from app.services.profile_service import ProfileService
 router = APIRouter()
 
 
-@router.get("", response_model=list[BrowserProfileStatus])
+@router.get("/api/v1/profiles", response_model=list[BrowserProfileStatus])
 async def list_browser_profiles(
     db: DbSession,
     current_user: CurrentUser,
@@ -20,7 +20,7 @@ async def list_browser_profiles(
     return await svc.list_profiles(login_only=login_only)
 
 
-@router.get("/{profile_name}", response_model=BrowserProfileStatus)
+@router.get("/api/v1/profiles/{profile_name}", response_model=BrowserProfileStatus)
 async def get_browser_profile(
     profile_name: str,
     db: DbSession,

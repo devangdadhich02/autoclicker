@@ -76,7 +76,7 @@ def _read_all_leads() -> list[dict[str, Any]]:
     return all_leads
 
 
-@router.get("", response_model=LeadsListResponse)
+@router.get("/api/v1/leads", response_model=LeadsListResponse)
 async def list_leads(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -153,7 +153,7 @@ async def list_leads(
     )
 
 
-@router.get("/stats")
+@router.get("/api/v1/leads/stats")
 async def leads_stats(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -182,7 +182,7 @@ async def leads_stats(
     }
 
 
-@router.delete("/{lead_id}")
+@router.delete("/api/v1/leads/{lead_id}")
 async def delete_lead(
     lead_id: str,
     current_user: User = Depends(get_current_user),
@@ -224,7 +224,7 @@ async def delete_lead(
         raise HTTPException(status_code=500, detail=f"Failed to delete lead: {str(e)}")
 
 
-@router.delete("")
+@router.delete("/api/v1/leads")
 async def delete_all_leads(
     job_id: str | None = Query(None),
     current_user: User = Depends(get_current_user),

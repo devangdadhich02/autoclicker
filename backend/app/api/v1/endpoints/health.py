@@ -17,12 +17,12 @@ router = APIRouter()
 _START_TIME = time.time()
 
 
-@router.get("", summary="Health check")
+@router.get("/api/v1/health", summary="Health check")
 async def health_check() -> dict:
     return {"status": "ok", "timestamp": datetime.now(UTC).isoformat()}
 
 
-@router.get("/detailed", summary="Detailed system health")
+@router.get("/api/v1/health/detailed", summary="Detailed system health")
 async def detailed_health(db: DbSession) -> dict:
     # DB check
     db_ok = False
@@ -63,6 +63,6 @@ async def detailed_health(db: DbSession) -> dict:
     }
 
 
-@router.get("/ping", summary="Simple ping")
+@router.get("/api/v1/health/ping", summary="Simple ping")
 async def ping() -> dict:
     return {"pong": True}

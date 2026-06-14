@@ -17,7 +17,7 @@ from app.services.job_service import JobService
 router = APIRouter()
 
 
-@router.get("", response_model=list[EventLogResponse])
+@router.get("/api/v1/logs", response_model=list[EventLogResponse])
 async def list_logs(
     db: DbSession,
     current_user: CurrentUser,
@@ -38,7 +38,7 @@ async def list_logs(
     return [EventLogResponse.model_validate(log) for log in logs]
 
 
-@router.get("/analytics/summary", response_model=AnalyticsSummary)
+@router.get("/api/v1/logs/analytics/summary", response_model=AnalyticsSummary)
 async def get_analytics_summary(
     db: DbSession,
     current_user: CurrentUser,
@@ -76,7 +76,7 @@ def _flatten_lead_details(details: dict) -> dict:
     return details
 
 
-@router.delete("/clear")
+@router.delete("/api/v1/logs/clear")
 async def clear_logs(
     db: DbSession,
     _admin: AdminUser,
@@ -104,7 +104,7 @@ async def clear_logs(
     }
 
 
-@router.get("/export/csv")
+@router.get("/api/v1/logs/export/csv")
 async def export_logs_csv(
     db: DbSession,
     current_user: CurrentUser,
@@ -167,7 +167,7 @@ async def export_logs_csv(
     )
 
 
-@router.get("/export/leads/csv")
+@router.get("/api/v1/logs/export/leads/csv")
 async def export_leads_csv(
     db: DbSession,
     current_user: CurrentUser,

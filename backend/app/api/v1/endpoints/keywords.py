@@ -24,7 +24,7 @@ async def _assert_job_access(job_id: str, current_user, db) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
 
 
-@router.get("", response_model=list[KeywordResponse])
+@router.get("/api/v1/jobs/{job_id}/keywords", response_model=list[KeywordResponse])
 async def list_keywords(job_id: str, db: DbSession, current_user: CurrentUser) -> list[KeywordResponse]:
     await _assert_job_access(job_id, current_user, db)
     svc = KeywordService(db)
@@ -32,7 +32,11 @@ async def list_keywords(job_id: str, db: DbSession, current_user: CurrentUser) -
     return [KeywordResponse.model_validate(k) for k in keywords]
 
 
-@router.post("", response_model=KeywordResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/api/v1/jobs/{job_id}/keywords",
+    response_model=KeywordResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_keyword(
     job_id: str, body: KeywordCreate, db: DbSession, current_user: OperatorUser
 ) -> KeywordResponse:
@@ -52,7 +56,7 @@ async def create_keyword(
     return KeywordResponse.model_validate(kw)
 
 
-@router.patch("/{keyword_id}", response_model=KeywordResponse)
+@router.patch("/api/v1/jobs/{job_id}/keywords/{keyword_id}", response_model=KeywordResponse)
 async def update_keyword(
     job_id: str,
     keyword_id: str,
@@ -69,7 +73,7 @@ async def update_keyword(
     return KeywordResponse.model_validate(kw)
 
 
-@router.delete("/{keyword_id}")
+@router.delete("/api/v1/jobs/{job_id}/keywords/{keyword_id}")
 async def delete_keyword(
     job_id: str, keyword_id: str, db: DbSession, current_user: OperatorUser
 ) -> Response:
@@ -91,7 +95,11 @@ class KeywordsBulkCreate(BaseModel):
     cooldown_seconds: int = Field(default=300, ge=0)
 
 
-@router.post("/bulk", response_model=list[KeywordResponse], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/api/v1/jobs/{job_id}/keywords/bulk",
+    response_model=list[KeywordResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_keywords_bulk(
     job_id: str, body: KeywordsBulkCreate, db: DbSession, current_user: OperatorUser
 ) -> list[KeywordResponse]:

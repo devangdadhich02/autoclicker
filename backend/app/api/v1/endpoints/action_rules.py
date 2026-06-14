@@ -23,7 +23,7 @@ async def _assert_job_access(job_id: str, current_user, db) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=exc.message)
 
 
-@router.get("", response_model=list[ActionRuleResponse])
+@router.get("/api/v1/jobs/{job_id}/actions", response_model=list[ActionRuleResponse])
 async def list_action_rules(
     job_id: str, db: DbSession, current_user: CurrentUser
 ) -> list[ActionRuleResponse]:
@@ -35,7 +35,11 @@ async def list_action_rules(
     return [ActionRuleResponse.model_validate(r) for r in rules]
 
 
-@router.post("", response_model=ActionRuleResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/api/v1/jobs/{job_id}/actions",
+    response_model=ActionRuleResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_action_rule(
     job_id: str, body: ActionRuleCreate, db: DbSession, current_user: OperatorUser
 ) -> ActionRuleResponse:
@@ -47,7 +51,7 @@ async def create_action_rule(
     return ActionRuleResponse.model_validate(rule)
 
 
-@router.patch("/{rule_id}", response_model=ActionRuleResponse)
+@router.patch("/api/v1/jobs/{job_id}/actions/{rule_id}", response_model=ActionRuleResponse)
 async def update_action_rule(
     job_id: str,
     rule_id: str,
@@ -69,7 +73,7 @@ async def update_action_rule(
     return ActionRuleResponse.model_validate(rule)
 
 
-@router.delete("/{rule_id}")
+@router.delete("/api/v1/jobs/{job_id}/actions/{rule_id}")
 async def delete_action_rule(
     job_id: str, rule_id: str, db: DbSession, current_user: OperatorUser
 ) -> Response:

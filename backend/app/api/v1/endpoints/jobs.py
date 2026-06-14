@@ -11,7 +11,7 @@ from app.services.job_service import JobService
 router = APIRouter()
 
 
-@router.get("", response_model=list[JobResponse])
+@router.get("/api/v1/jobs", response_model=list[JobResponse])
 async def list_jobs(
     db: DbSession,
     current_user: CurrentUser,
@@ -25,7 +25,7 @@ async def list_jobs(
     return [JobResponse.model_validate(j) for j in jobs]
 
 
-@router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/api/v1/jobs", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
 async def create_job(
     body: JobCreate, db: DbSession, current_user: OperatorUser
 ) -> JobResponse:
@@ -42,7 +42,7 @@ async def create_job(
     return JobResponse.model_validate(job)
 
 
-@router.get("/{job_id}", response_model=JobResponse)
+@router.get("/api/v1/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str, db: DbSession, current_user: CurrentUser) -> JobResponse:
     svc = JobService(db)
     try:
@@ -53,7 +53,7 @@ async def get_job(job_id: str, db: DbSession, current_user: CurrentUser) -> JobR
     return JobResponse.model_validate(job)
 
 
-@router.patch("/{job_id}", response_model=JobResponse)
+@router.patch("/api/v1/jobs/{job_id}", response_model=JobResponse)
 async def update_job(
     job_id: str, body: JobUpdate, db: DbSession, current_user: OperatorUser
 ) -> JobResponse:
@@ -66,7 +66,7 @@ async def update_job(
     return JobResponse.model_validate(job)
 
 
-@router.delete("/{job_id}")
+@router.delete("/api/v1/jobs/{job_id}")
 async def delete_job(job_id: str, db: DbSession, current_user: OperatorUser) -> Response:
     scheduler = get_scheduler()
     if scheduler.is_running(job_id):
@@ -80,7 +80,7 @@ async def delete_job(job_id: str, db: DbSession, current_user: OperatorUser) -> 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/{job_id}/control", response_model=JobResponse)
+@router.post("/api/v1/jobs/{job_id}/control", response_model=JobResponse)
 async def control_job(
     job_id: str,
     body: JobControlRequest,
@@ -109,7 +109,7 @@ async def control_job(
     return JobResponse.model_validate(job)
 
 
-@router.get("/{job_id}/status")
+@router.get("/api/v1/jobs/{job_id}/status")
 async def get_job_runtime_status(
     job_id: str, db: DbSession, current_user: CurrentUser
 ) -> dict:
