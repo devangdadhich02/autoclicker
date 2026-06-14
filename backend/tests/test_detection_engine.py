@@ -45,20 +45,20 @@ def test_contains_no_match():
     assert len(results) == 0
 
 
-def test_contains_semantic_marking_matches_engraving():
+def test_contains_strict_marking_does_not_match_engraving():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw-semantic-1", "fiber laser metal marking machine")
     text = "Buyer needs fiber laser metal engraving machine for steel parts"
     results = engine.evaluate(text, [kw])
-    assert len(results) == 1
+    assert len(results) == 0
 
 
-def test_short_marking_keyword_matches_indiamart_engraving_machine_alias():
+def test_short_marking_keyword_does_not_match_indiamart_engraving_machine_alias():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw-short-marking", "Laser marking machine")
     text = "Laser Engraving Machines\nCr-laser Falcon Engraver-20w\nMumbai, Maharashtra"
     results = engine.evaluate(text, [kw])
-    assert len(results) == 1
+    assert len(results) == 0
 
 
 def test_exact_match():

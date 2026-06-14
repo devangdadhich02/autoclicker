@@ -39,10 +39,8 @@ _GENERIC_MATCH_WORDS = frozenset(
 )
 
 _SEMANTIC_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
-    # IndiaMART often uses engraving/hallmarking where sellers configure marking.
-    "marking": ("marking", "engraving", "hallmarking", "etching", "engrave"),
-    "engraving": ("engraving", "marking", "hallmarking", "etching", "engrave"),
-    "hallmarking": ("hallmarking", "marking", "engraving"),
+    # Keep keyword matching strict by default. Do not silently broaden
+    # "marking" into "engraving"; clicking the wrong IndiaMART lead sends a buyer message.
 }
 _SEMANTIC_VARIANT_TO_CANONICAL: dict[str, str] = {}
 for _canonical, _variants in _SEMANTIC_TOKEN_ALIASES.items():
@@ -145,11 +143,7 @@ class DetectionEngine:
     def _flexible_contains(
         self, term: str, text: str, case_sensitive: bool
     ) -> re.Match[str] | None:
-        """Fallback when exact substring fails (spacing/casing/product title variants).
-
-        CRITICAL: Only match if ALL significant words from term are present in text.
-        Prevents partial matches like "laser marking" matching "laser engraving".
-        """
+        """Fallback when exact substring fails (spacing/casing/product title variants)."""
         flags = 0 if case_sensitive else re.IGNORECASE
         t = term if case_sensitive else term.lower()
         body = text if case_sensitive else text.lower()
@@ -157,12 +151,7 @@ class DetectionEngine:
         if not words:
             return None
         specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
-        product_alias_tokens = {"marking", "engraving", "hallmarking"}
-        allow_semantic_alias = len(specific) >= 3 or (
-            "laser" in words
-            and "machine" in words
-            and any(token in words for token in product_alias_tokens)
-        )
+        allow_semantic_alias = False
         body_norm = _normalize_semantic_tokens(body)
 
         # First check: exact phrase match. Semantic aliases are allowed only for

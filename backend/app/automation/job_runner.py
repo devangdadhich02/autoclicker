@@ -143,6 +143,9 @@ class JobRunner:
         self._indiamart_lead_queue: list[QueuedIndiaMartLead] = []
         self._queued_lead_fingerprints: set[str] = set()
         self._indiamart_action_task: asyncio.Task[Any] | None = None
+        self._indiamart_action_warm_task: asyncio.Task[Any] | None = None
+        self._indiamart_action_page: Any | None = None
+        self._indiamart_action_page_ready = False
         self._indiamart_action_lock = asyncio.Lock()
 
     @property
@@ -243,6 +246,8 @@ class JobRunner:
                 if self._browser:
                     try:
                         await self._browser.restart()
+                        self._indiamart_action_page = None
+                        self._indiamart_action_page_ready = False
                     except Exception:
                         self._browser = None
 
@@ -390,6 +395,7 @@ class JobRunner:
                 target_url=leads_url,
                 url=page.url,
             )
+        self._ensure_indiamart_action_page_warm(browser, job)
         now = datetime.now(UTC)
         deep_scan_due = (
             self._last_deep_indiamart_scan_at is None
@@ -587,6 +593,74 @@ class JobRunner:
         )
         self._indiamart_action_task.add_done_callback(self._on_indiamart_action_done)
 
+    def _ensure_indiamart_action_page_warm(
+        self,
+        browser: BrowserManager,
+        job: AutomationJob,
+    ) -> None:
+        if self._indiamart_action_page_ready:
+            return
+        if self._indiamart_action_warm_task and not self._indiamart_action_warm_task.done():
+            return
+        self._indiamart_action_warm_task = asyncio.create_task(
+            self._warm_indiamart_action_page(browser, job),
+            name=f"indiamart_action_warm_{self.job_id}",
+        )
+
+    async def _warm_indiamart_action_page(
+        self,
+        browser: BrowserManager,
+        job: AutomationJob,
+    ) -> None:
+        try:
+            async with self._indiamart_action_lock:
+                await self._get_indiamart_action_page(browser, job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._indiamart_action_page_ready = False
+            logger.warning(
+                "IndiaMART action page warm-up failed",
+                job_id=self.job_id,
+                error=str(exc),
+            )
+
+    async def _get_indiamart_action_page(
+        self,
+        browser: BrowserManager,
+        job: AutomationJob,
+    ) -> Any:
+        page = self._indiamart_action_page
+        try:
+            closed = page is None or page.is_closed()
+        except Exception:
+            closed = True
+        if closed:
+            page = await browser.new_page()
+            self._indiamart_action_page = page
+            self._indiamart_action_page_ready = False
+
+        leads_url = _indiamart_recent_leads_url(job.target_url)
+        current_url = ""
+        try:
+            current_url = (page.url or "").lower()
+        except Exception:
+            current_url = ""
+        already_on_recent = (
+            "seller.indiamart.com" in current_url
+            and "bltxn" in current_url
+            and "pref=recent" in current_url
+        )
+        if not self._indiamart_action_page_ready or not already_on_recent:
+            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+            self._indiamart_action_page_ready = True
+            logger.info(
+                "IndiaMART action page ready",
+                job_id=self.job_id,
+                url=page.url,
+            )
+        return page
+
     def _on_indiamart_action_done(self, task: asyncio.Task[Any]) -> None:
         if task.cancelled():
             logger.info("IndiaMART action worker cancelled", job_id=self.job_id)
@@ -607,22 +681,15 @@ class JobRunner:
         action_rules: list[ActionRule],
     ) -> None:
         async with self._indiamart_action_lock:
-            page = await browser.new_page()
+            page = await self._get_indiamart_action_page(browser, job)
             leads_url = _indiamart_recent_leads_url(job.target_url)
-            try:
-                await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
-                while self._indiamart_lead_queue and not self._shutdown_event.is_set():
-                    item = self._indiamart_lead_queue.pop(0)
-                    self._queued_lead_fingerprints.discard(item.fingerprint)
-                    await self._process_queued_indiamart_lead(
-                        page, item, job, keywords, action_rules, browser, leads_url
-                    )
-                    await self._heartbeat()
-            finally:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+            while self._indiamart_lead_queue and not self._shutdown_event.is_set():
+                item = self._indiamart_lead_queue.pop(0)
+                self._queued_lead_fingerprints.discard(item.fingerprint)
+                await self._process_queued_indiamart_lead(
+                    page, item, job, keywords, action_rules, browser, leads_url
+                )
+                await self._heartbeat()
 
     async def _process_queued_indiamart_lead(
         self,
@@ -682,7 +749,19 @@ class JobRunner:
             )
             return
 
-        await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+        current_url = ""
+        try:
+            current_url = (page.url or "").lower()
+        except Exception:
+            current_url = ""
+        if (
+            not self._indiamart_action_page_ready
+            or "seller.indiamart.com" not in current_url
+            or "bltxn" not in current_url
+            or "pref=recent" not in current_url
+        ):
+            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+            self._indiamart_action_page_ready = True
         await scroll_lead_list(page)
         try:
             stale_panel_text = await _read_detail_panel_text(page)
@@ -1221,6 +1300,10 @@ class JobRunner:
 
     async def _cleanup(self) -> None:
         self._is_running = False
+        if self._indiamart_action_warm_task and not self._indiamart_action_warm_task.done():
+            self._indiamart_action_warm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._indiamart_action_warm_task
         if self._indiamart_action_task and not self._indiamart_action_task.done():
             self._indiamart_action_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
