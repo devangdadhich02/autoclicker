@@ -53,12 +53,12 @@ def test_contains_semantic_marking_matches_engraving():
     assert len(results) == 1
 
 
-def test_short_marking_keyword_does_not_match_generic_engraving_machine():
+def test_short_marking_keyword_matches_indiamart_engraving_machine_alias():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw-short-marking", "Laser marking machine")
-    text = "Co2 Laser Engraving Machine\nSaudi Arabia, Engraving Machines"
+    text = "Laser Engraving Machines\nCr-laser Falcon Engraver-20w\nMumbai, Maharashtra"
     results = engine.evaluate(text, [kw])
-    assert results == []
+    assert len(results) == 1
 
 
 def test_exact_match():

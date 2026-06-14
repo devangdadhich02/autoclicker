@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyHttpUrl, EmailStr, field_validator
+from pydantic import EmailStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -54,8 +54,9 @@ class Settings(BaseSettings):
     # ── Automation ──────────────────────────────────────────────────────────
     MAX_CONCURRENT_JOBS: int = 5
     DEFAULT_POLL_INTERVAL_SECONDS: int = 5
-    INDIAMART_FAST_SCAN_INTERVAL_SECONDS: float = 0.75
+    INDIAMART_FAST_SCAN_INTERVAL_SECONDS: float = 0.25
     INDIAMART_DEEP_SCAN_INTERVAL_SECONDS: int = 30
+    INDIAMART_VISIBLE_SCAN_WAIT_MS: int = 500
     ACTION_RETRY_ATTEMPTS: int = 3
     ACTION_RETRY_DELAY_SECONDS: float = 1.0
     WATCHDOG_CHECK_INTERVAL_SECONDS: int = 30

@@ -6,12 +6,13 @@ from dataclasses import dataclass
 
 from playwright.async_api import Page
 
-logger = logging.getLogger(__name__)
-
 from app.automation.indiamart_page import (
     INQUIRY_ROW_SELECTORS,
     scroll_lead_list,
 )
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # Hard navigation / catalog text that should never count as a buyer lead.
 _HARD_NON_LEAD_PHRASES = (
@@ -632,7 +633,10 @@ def _split_candidate_text_into_cards(
 async def collect_buyer_lead_blocks(
     page: Page, max_blocks: int = 40, *, visible_only: bool = False
 ) -> list[BuyerLeadBlock]:
-    await _wait_for_lead_feed(page, timeout_ms=1_800 if visible_only else 6_000)
+    await _wait_for_lead_feed(
+        page,
+        timeout_ms=settings.INDIAMART_VISIBLE_SCAN_WAIT_MS if visible_only else 6_000,
+    )
     if not visible_only:
         await scroll_lead_list(page, aggressive=True)
 

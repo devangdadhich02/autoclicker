@@ -24,7 +24,12 @@ class KeywordService:
             query = query.where(Keyword.is_active.is_(True))
         query = query.order_by(Keyword.priority.desc(), Keyword.created_at)
         result = await self._db.execute(query)
-        return list(result.scalars().all())
+        keywords = list(result.scalars().all())
+        for keyword in keywords:
+            keyword.value = (keyword.value or "").strip()
+            if keyword.location_filter:
+                keyword.location_filter = keyword.location_filter.strip()
+        return keywords
 
     async def create(
         self,
@@ -40,13 +45,13 @@ class KeywordService:
     ) -> Keyword:
         kw = Keyword(
             job_id=job_id,
-            value=value,
+            value=value.strip(),
             match_type=match_type,
             case_sensitive=case_sensitive,
             priority=priority,
             score=score,
             category=category,
-            location_filter=location_filter,
+            location_filter=location_filter.strip() if location_filter else None,
             cooldown_seconds=cooldown_seconds,
         )
         self._db.add(kw)
@@ -62,6 +67,8 @@ class KeywordService:
         }
         for key, value in fields.items():
             if key in allowed:
+                if key in {"value", "location_filter"} and isinstance(value, str):
+                    value = value.strip()
                 setattr(kw, key, value)
         await self._db.flush()
         await self._db.refresh(kw)

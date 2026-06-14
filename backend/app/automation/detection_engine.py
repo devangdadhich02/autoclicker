@@ -157,7 +157,12 @@ class DetectionEngine:
         if not words:
             return None
         specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
-        allow_semantic_alias = len(specific) >= 3
+        product_alias_tokens = {"marking", "engraving", "hallmarking"}
+        allow_semantic_alias = len(specific) >= 3 or (
+            "laser" in words
+            and "machine" in words
+            and any(token in words for token in product_alias_tokens)
+        )
         body_norm = _normalize_semantic_tokens(body)
 
         # First check: exact phrase match. Semantic aliases are allowed only for
