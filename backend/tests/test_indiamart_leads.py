@@ -360,6 +360,24 @@ def test_accepts_fresh_contact_popup_without_product_title():
     assert _panel_matches_block(panel, block, stale_panel_text=stale)
 
 
+def test_rejects_changed_stale_contact_card_without_buyer_greeting():
+    block = (
+        "Fiber Laser Cutting Machine\n"
+        "Patna, Bihar\n"
+        "57 mins ago\n"
+        "Category: Fiber Laser Cutting Machine\n"
+        "Requirement Type: Business Use"
+    )
+    stale = "Lead Manager\nRecent Buy Leads\nFiber Laser Cutting Machine"
+    old_panel = (
+        "Co2 Laser Engraving Machine\n"
+        "Saudi Arabia, Engraving Machines\n"
+        "Phone 9313310116\n"
+        "NC-Scriber/Lettering Machine and Drafting Aid"
+    )
+    assert not _panel_matches_block(old_panel, block, stale_panel_text=stale)
+
+
 def test_screenshot_style_contact_popup_extracts_buyer_details():
     block = (
         "CO2 Laser Cutting Machine\n"

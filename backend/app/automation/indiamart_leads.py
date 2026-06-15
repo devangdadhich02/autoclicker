@@ -1583,6 +1583,17 @@ def _panel_has_contact_card(text: str) -> bool:
     return has_nameish or len(lines) <= 20
 
 
+def _panel_has_fresh_buyer_response_popup(text: str) -> bool:
+    """IndiaMART response popup may omit product title; require buyer-name greeting."""
+    if not _panel_has_contact_card(text):
+        return False
+    name = _extract_name_from_panel_top(text) or _parse_name_from_panel(text)
+    if not name:
+        return False
+    first = re.escape(name.split()[0])
+    return bool(re.search(rf"\bhi\s+{first}\b", text, re.IGNORECASE))
+
+
 def _panel_matches_block(
     panel_text: str, block_text: str, *, stale_panel_text: str = ""
 ) -> bool:
@@ -1608,8 +1619,14 @@ def _panel_matches_block(
 
     # IndiaMART's response popup can show buyer name/email/phone in the left rail while
     # the message area contains seller product/template text, not the buy-lead title.
-    # Accept that contact card only when it is freshly opened after the row click.
-    return bool(stale_panel_text) and panel_changed and _panel_has_contact_card(panel_text)
+    # Accept that no-title contact card only when it is freshly opened and has a
+    # buyer-name greeting. This prevents stale old panels from leaking old phones
+    # like 9313310116 into unrelated leads.
+    return (
+        bool(stale_panel_text)
+        and panel_changed
+        and _panel_has_fresh_buyer_response_popup(panel_text)
+    )
 
 
 async def _wait_for_detail_panel_after_click(
@@ -1781,11 +1798,13 @@ async def extract_buyer_details(
                     if val and len(val) < 500:
                         if field == "buyer_phone":
                             digits = re.sub(r"\D", "", val)
-                            if len(digits) >= 10:
+                            if len(digits) >= 10 and is_plausible_buyer_phone(
+                                val, block_text, panel_text
+                            ):
                                 lead[field] = digits[-10:] if len(digits) > 10 else digits
                         elif field == "buyer_email":
                             # Validate email format
-                            if _EMAIL_RE.match(val):
+                            if _EMAIL_RE.match(val) and val.lower() in panel_text.lower():
                                 lead[field] = val
                         else:
                             lead[field] = val
@@ -1793,9 +1812,19 @@ async def extract_buyer_details(
                 continue
 
         dom_contact = await _scrape_contact_from_dom(page)
-        if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
+        if (
+            dom_contact.get("buyer_phone")
+            and not lead.get("buyer_phone")
+            and is_plausible_buyer_phone(
+                dom_contact["buyer_phone"], block_text, panel_text
+            )
+        ):
             lead["buyer_phone"] = dom_contact["buyer_phone"]
-        if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
+        if (
+            dom_contact.get("buyer_email")
+            and not lead.get("buyer_email")
+            and dom_contact["buyer_email"].lower() in panel_text.lower()
+        ):
             lead["buyer_email"] = dom_contact["buyer_email"]
         if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
             lead["buyer_name"] = dom_contact["buyer_name"]
@@ -1819,9 +1848,19 @@ async def extract_buyer_details(
             if panel_matches_block:
                 _apply_panel_text_to_lead(lead, panel_text, block_text)
                 dom_contact = await _scrape_contact_from_dom(page)
-                if dom_contact.get("buyer_phone") and not lead.get("buyer_phone"):
+                if (
+                    dom_contact.get("buyer_phone")
+                    and not lead.get("buyer_phone")
+                    and is_plausible_buyer_phone(
+                        dom_contact["buyer_phone"], block_text, panel_text
+                    )
+                ):
                     lead["buyer_phone"] = dom_contact["buyer_phone"]
-                if dom_contact.get("buyer_email") and not lead.get("buyer_email"):
+                if (
+                    dom_contact.get("buyer_email")
+                    and not lead.get("buyer_email")
+                    and dom_contact["buyer_email"].lower() in panel_text.lower()
+                ):
                     lead["buyer_email"] = dom_contact["buyer_email"]
                 if dom_contact.get("buyer_name") and not lead.get("buyer_name"):
                     lead["buyer_name"] = dom_contact["buyer_name"]
