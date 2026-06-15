@@ -51,14 +51,6 @@ def load_seen_lead_fingerprints(job_id: str, job_name: str) -> set[str]:
     try:
         with path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                phone = re.sub(r"\D", "", row.get("buyer_phone") or "")
-                if len(phone) >= 10:
-                    seen.add(f"ph:{phone[-10:]}")
-                    continue
-                email = (row.get("buyer_email") or "").strip().lower()
-                if email:
-                    seen.add(f"em:{email}")
-                    continue
                 snippet = row.get("context_snippet") or row.get("inquiry_message") or ""
                 fp = row.get("lead_fingerprint") or (
                     lead_fingerprint(snippet, {}) if snippet else ""
@@ -72,6 +64,18 @@ def load_seen_lead_fingerprints(job_id: str, job_name: str) -> set[str]:
                     continue
                 if fp:
                     seen.add(fp.removeprefix("partial:"))
+                    continue
+
+                # Backward compatibility for old CSV rows written before scoped
+                # phone/email fingerprints were stored.
+                phone = re.sub(r"\D", "", row.get("buyer_phone") or "")
+                if len(phone) >= 10:
+                    seen.add(f"ph:{phone[-10:]}")
+                    continue
+                email = (row.get("buyer_email") or "").strip().lower()
+                if email:
+                    seen.add(f"em:{email}")
+                    continue
     except Exception as exc:
         logger.warning("Could not load lead fingerprints", path=str(path), error=str(exc))
     return seen

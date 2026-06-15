@@ -478,7 +478,12 @@ class JobRunner:
         matches: list[tuple[BuyerLeadBlock, Any]] = []
         for block in blocks:
             match_text = lead_match_text(block.text)
-            block_results = self._detection.evaluate(match_text, keywords)
+            # IndiaMART lead rows are already deduped by lead fingerprint. Do not
+            # let keyword cooldown hide the next fresh buyer row for the same
+            # product family.
+            block_results = DetectionEngine(
+                f"{self.job_id}:indiamart_scan"
+            ).evaluate(match_text, keywords)
             if not block_results:
                 continue
             result = block_results[0]

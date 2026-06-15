@@ -184,9 +184,16 @@ def test_lead_fingerprint_ignores_time_ago():
 
 
 def test_lead_fingerprint_uses_phone_when_present():
-    block = "Laser Cleaning Machine Pune"
+    block = "Laser Cleaning Machine\nPune, Maharashtra\n2 hrs ago"
     fp = lead_fingerprint(block, {"buyer_phone": "9876543210"})
-    assert fp == "ph:9876543210"
+    assert fp == "ph:9876543210|laser cleaning machine|pune, maharashtra"
+
+
+def test_same_phone_different_product_gets_distinct_fingerprint():
+    phone = {"buyer_phone": "9876543210"}
+    welding = "Laser Welding Machine\nKheda, Gujarat\n4 mins ago"
+    cleaning = "Laser Cleaning Machine\nKheda, Gujarat\n5 mins ago"
+    assert lead_fingerprint(welding, phone) != lead_fingerprint(cleaning, phone)
 
 
 def test_lead_complete_with_time_and_location():

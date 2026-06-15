@@ -365,22 +365,27 @@ def _parse_address_from_text(text: str) -> str:
 
 
 def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str:
-    """Stable key for dedup — phone/email best; else product + city (ignores 'X hrs ago')."""
+    """Stable key for dedup — phone/email scoped to product + city, else product + city."""
     lead = lead or {}
-    digits = re.sub(r"\D", "", lead.get("buyer_phone") or "")
-    if len(digits) >= 10:
-        return f"ph:{digits[-10:]}"
-    email = (lead.get("buyer_email") or "").strip().lower()
-    if email:
-        return f"em:{email}"
     one = _TIME_RE.sub("", " ".join(block_text.split())).lower()
-    loc = _CITY_STATE_RE.search(block_text)
-    city = (loc.group(0) if loc else "").lower().strip()
+    address = (
+        (lead.get("buyer_address") or lead.get("buyer_location") or "").strip()
+        or _parse_address_from_text(block_text)
+    )
+    loc = _CITY_STATE_RE.search(address)
+    city = (loc.group(0) if loc else address).lower().strip()
     cat = re.search(r">\s*([^>]+?)(?:\s+power\s*:|\s+probable)", one, re.I)
     product = cat.group(1).strip().lower()[:80] if cat else ""
     if not product:
         product = _lead_title_for_click(block_text).lower()[:80]
     product = re.sub(r"\s+", " ", product).strip()
+    scope = f"{product}|{city}"
+    digits = re.sub(r"\D", "", lead.get("buyer_phone") or "")
+    if len(digits) >= 10:
+        return f"ph:{digits[-10:]}|{scope}"
+    email = (lead.get("buyer_email") or "").strip().lower()
+    if email:
+        return f"em:{email}|{scope}"
     return f"pk:{product}|{city}"
 
 
