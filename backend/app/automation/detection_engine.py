@@ -35,12 +35,19 @@ _GENERIC_MATCH_WORDS = frozenset(
         "products",
         "industrial",
         "equipment",
+        "laser",
     }
 )
 
 _SEMANTIC_TOKEN_ALIASES: dict[str, tuple[str, ...]] = {
-    # Keep keyword matching strict by default. Do not silently broaden
-    # "marking" into "engraving"; clicking the wrong IndiaMART lead sends a buyer message.
+    # Product wording drifts between noun/verb forms on IndiaMART cards.
+    # Keep process families separate: marking/marker is not engraving, and
+    # welding is not cutting.
+    "mark": ("marking", "marker", "markers"),
+    "weld": ("welding", "welder", "welders"),
+    "clean": ("cleaning", "cleaner", "cleaners"),
+    "cut": ("cutting", "cutter", "cutters"),
+    "engrave": ("engraving", "engraver", "engravers"),
 }
 _SEMANTIC_VARIANT_TO_CANONICAL: dict[str, str] = {}
 for _canonical, _variants in _SEMANTIC_TOKEN_ALIASES.items():
@@ -65,6 +72,10 @@ def _normalize_semantic_tokens(text: str) -> str:
 
 def _significant_words(text: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 3]
+
+
+def _normalized_word_set(text: str) -> set[str]:
+    return set(_significant_words(_normalize_semantic_tokens(text)))
 
 
 @dataclass
@@ -150,43 +161,42 @@ class DetectionEngine:
         words = _significant_words(t)
         if not words:
             return None
-        specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
-        allow_semantic_alias = False
+        term_norm = _normalize_semantic_tokens(t)
         body_norm = _normalize_semantic_tokens(body)
+        term_words_norm = _normalized_word_set(t)
+        body_words_norm = _normalized_word_set(body)
+        specific = [w for w in term_words_norm if w not in _GENERIC_MATCH_WORDS]
 
-        # First check: exact phrase match. Semantic aliases are allowed only for
-        # longer/specific product phrases; short phrases stay literal.
-        if t in body or (
-            allow_semantic_alias and _normalize_semantic_tokens(t) in body_norm
-        ):
+        # First check: exact phrase match, including safe noun/verb variants
+        # such as marker/marking and cutter/cutting.
+        if t in body or term_norm in body_norm:
             return re.search(re.escape(term), text, flags) or re.search(
                 re.escape(_significant_words(term)[0]), text, flags
             )
 
-        # CRITICAL FIX: Require ALL specific words to match, not just some
-        # This prevents "laser marking" from matching "laser engraving"
         if specific:
-            # Check if ALL specific words are present. For short keywords like
-            # "Laser marking machine", do not let the marking/engraving alias
-            # broaden the match into unrelated IndiaMART recommendations.
-            all_specific_match = all(
-                w in body
-                or (allow_semantic_alias and _normalize_semantic_tokens(w) in body_norm)
-                for w in specific
-            )
-            if not all_specific_match:
+            if not all(w in body_words_norm for w in specific):
+                # Controlled family fallback for seller keywords like
+                # "Fiber laser marker" when IndiaMART lists the same fiber-laser
+                # buyer under "Fiber Laser Cutting Machine". This does not make
+                # "Laser marking machine" match all laser machines.
+                if not (
+                    {"fiber", "laser"}.issubset(term_words_norm)
+                    and {"fiber", "laser"}.issubset(body_words_norm)
+                    and (
+                        "engrave" not in body_words_norm
+                        or "engrave" in term_words_norm
+                    )
+                    and len(specific) <= 2
+                ):
+                    return None
+            if not any(w in body_words_norm for w in specific):
                 return None
-            # All specific words found - return match for first word
-            return re.search(re.escape(specific[0]), text, flags)
+            match_word = next((w for w in specific if w in body_words_norm), specific[0])
+            return re.search(re.escape(match_word), text, flags)
 
-        # If no specific words (all generic like "laser marking machine"),
-        # require at least 2 words to match to reduce false positives
         if len(words) >= 2:
-            hits = [
-                w for w in words
-                if w in body or _normalize_semantic_tokens(w) in body_norm
-            ]
-            # Require ALL words to match for generic phrases
+            hits = [w for w in term_words_norm if w in body_words_norm]
             if len(hits) == len(words):
                 return re.search(re.escape(words[0]), text, flags)
 
@@ -204,8 +214,8 @@ class DetectionEngine:
         specific = [w for w in words if w not in _GENERIC_MATCH_WORDS]
         if not specific:
             return None
-        body_norm = _normalize_semantic_tokens(text)
-        if not all(_normalize_semantic_tokens(w) in body_norm for w in specific):
+        body_words = _normalized_word_set(text)
+        if not all(_normalize_semantic_tokens(w) in body_words for w in specific):
             return None
         return re.search(re.escape(specific[0]), text, re.IGNORECASE)
 

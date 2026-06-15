@@ -61,6 +61,22 @@ def test_short_marking_keyword_does_not_match_indiamart_engraving_machine_alias(
     assert len(results) == 0
 
 
+def test_marking_keyword_matches_marker_wording_variant():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw-marker-variant", "Laser marking machine")
+    text = "Fiber Laser Marker Machine\nAhmedabad, Gujarat\n1 mins ago"
+    results = engine.evaluate(text, [kw])
+    assert len(results) == 1
+
+
+def test_fiber_laser_keyword_matches_fiber_laser_family_card():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword("kw-fiber-family", "Fiber laser marker")
+    text = "Fiber Laser Cutting Machine\nAhmedabad, Gujarat\n1 mins ago"
+    results = engine.evaluate(text, [kw])
+    assert len(results) == 1
+
+
 def test_exact_match():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw2", "pipe", match_type=MatchType.exact)

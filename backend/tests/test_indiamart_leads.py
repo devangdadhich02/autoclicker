@@ -2,6 +2,7 @@ import types
 
 from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
+    _apply_panel_text_to_lead,
     _blocks_from_body_text,
     _lead_title_for_click,
     _panel_matches_block,
@@ -350,6 +351,31 @@ def test_accepts_fresh_contact_popup_without_product_title():
         "Greetings from Laser Lab (India) Private Limited."
     )
     assert _panel_matches_block(panel, block, stale_panel_text=stale)
+
+
+def test_screenshot_style_contact_popup_extracts_buyer_details():
+    block = (
+        "CO2 Laser Cutting Machine\n"
+        "Ludhiana, Punjab\n"
+        "42 mins ago\n"
+        "Category: CO2 Laser Cutting Machine\n"
+        "Requirement Type: Business Use"
+    )
+    panel = (
+        "Jahir\n"
+        "arjh2251@gmail.com\n"
+        "Member Since :\n"
+        "+91-9345441416\n"
+        "Hi Jahir,\n"
+        "Greetings from Laser Lab (India) Private Limited.\n"
+        "call us at 07942672646"
+    )
+    lead: dict[str, str] = {}
+    _apply_panel_text_to_lead(lead, panel, block)
+    lead = sanitize_lead_contacts(lead, block, panel)
+    assert lead["buyer_name"] == "Jahir"
+    assert lead["buyer_email"] == "arjh2251@gmail.com"
+    assert lead["buyer_phone"] == "+919345441416"
 
 
 def test_accepts_just_now_feed_row():

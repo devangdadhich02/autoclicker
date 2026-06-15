@@ -1074,6 +1074,7 @@ _CONTACT_REVEAL_LABELS = (
     "Get Contact Details",
     "Get Contact",
     "Call Buyer",
+    "Call Now",
     "View Buyer Details",
     "Contact Now",
     "View Phone",
@@ -1606,6 +1607,27 @@ def _panel_matches_block(
     return bool(stale_panel_text) and panel_changed and _panel_has_contact_card(panel_text)
 
 
+async def _wait_for_detail_panel_after_click(
+    page: Page,
+    block_text: str,
+    stale_panel_text: str = "",
+    timeout_ms: int = 4500,
+) -> str:
+    """Wait until the clicked lead's detail/contact panel replaces stale content."""
+    deadline = timeout_ms / 1000
+    loop = 0.0
+    latest = ""
+    while loop <= deadline:
+        latest = await _read_detail_panel_text(page)
+        if latest and _panel_matches_block(
+            latest, block_text, stale_panel_text=stale_panel_text
+        ):
+            return latest
+        await page.wait_for_timeout(250)
+        loop += 0.25
+    return latest
+
+
 def _extract_name_from_panel_top(panel_text: str) -> str:
     """IndiaMART contact popup shows buyer name as first prominent line."""
     lines = [ln.strip() for ln in panel_text.splitlines() if ln.strip()]
@@ -1703,7 +1725,9 @@ async def extract_buyer_details(
         if not lead.get("buyer_address"):
             lead["buyer_address"] = lead.get("buyer_location", "")
 
-    panel_text = await _read_detail_panel_text(page)
+    panel_text = await _wait_for_detail_panel_after_click(
+        page, block_text, stale_panel_text=stale_panel_text
+    )
     panel_matches_block = _panel_matches_block(
         panel_text, block_text, stale_panel_text=stale_panel_text
     )
