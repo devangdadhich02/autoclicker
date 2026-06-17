@@ -53,6 +53,7 @@ from app.services.keyword_service import KeywordService
 # Cap leads processed per poll so contact reveal + heartbeat stay within watchdog budget.
 _MAX_LEADS_PER_SCAN = 10
 _PARTIAL_CONTACT_RETRY_SECONDS = 10 * 60
+_CLICK_FAILURE_RETRY_SECONDS = 45
 
 # URL path patterns that indicate session has expired (avoid broad "auth" substring)
 _LOGIN_URL_PATTERNS = [
@@ -519,6 +520,7 @@ class JobRunner:
                 job_id=self.job_id,
                 queued=queued,
                 queue_size=len(self._indiamart_lead_queue),
+                matched_previews=[m[0].text[:240] for m in matches[:3]],
             )
         self._ensure_indiamart_action_worker(browser, job, keywords, action_rules)
 
@@ -801,6 +803,15 @@ class JobRunner:
             )
             return
         block = fresh_block
+        logger.info(
+            "Verified current lead before click",
+            job_id=self.job_id,
+            keyword=item.keyword_value,
+            queued_fingerprint=pre_fp,
+            current_fingerprint=lead_fingerprint(block.text, {}),
+            queue_wait_seconds=(datetime.now(UTC) - item.queued_at).total_seconds(),
+            current_preview=block.text[:300],
+        )
         await self._log_event(
             "lead_click_verified",
             f"Verified live lead before click: '{item.keyword_value}'.",
@@ -829,6 +840,9 @@ class JobRunner:
                 "Could not open current verified buyer row — skipped before contact extract",
                 job_id=self.job_id,
                 keyword=item.keyword_value,
+            )
+            self._partial_contact_retry_until[pre_fp] = datetime.now(UTC) + timedelta(
+                seconds=_CLICK_FAILURE_RETRY_SECONDS
             )
             await self._log_event(
                 "lead_click_skipped",

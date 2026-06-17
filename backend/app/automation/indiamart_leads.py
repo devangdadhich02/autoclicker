@@ -1424,16 +1424,21 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                 """(args) => {
                   const t = args.title.toLowerCase().slice(0, 80);
                   const address = (args.address || '').toLowerCase();
+                  const addressParts = address.split(',').map(s => s.trim()).filter(Boolean);
+                  const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                  const titleNeedle = norm(t);
+                  const addressNeedles = addressParts.map(norm).filter(Boolean);
                   const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
                   const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
                   let best = null;
                   let bestArea = Infinity;
                   for (const el of nodes) {
                     const raw = (el.innerText || '').trim();
-                    if (raw.length < 15 || raw.length > 900) continue;
+                    if (raw.length < 15 || raw.length > 2600) continue;
                     const low = raw.toLowerCase();
-                    if (!low.includes(t)) continue;
-                    if (address && !low.includes(address)) continue;
+                    const compact = norm(raw);
+                    if (!compact.includes(titleNeedle)) continue;
+                    if (addressNeedles.length && !addressNeedles.every(part => compact.includes(part))) continue;
                     if (!timeRe.test(raw)) continue;
                     const r = el.getBoundingClientRect();
                     const area = r.width * r.height;
