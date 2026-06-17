@@ -69,12 +69,24 @@ def test_marking_keyword_matches_marker_wording_variant():
     assert len(results) == 1
 
 
-def test_fiber_laser_keyword_matches_fiber_laser_family_card():
+def test_fiber_laser_marker_keyword_does_not_match_cutting_card():
     engine = DetectionEngine("test-job")
     kw = make_keyword("kw-fiber-family", "Fiber laser marker")
     text = "Fiber Laser Cutting Machine\nAhmedabad, Gujarat\n1 mins ago"
     results = engine.evaluate(text, [kw])
+    assert results == []
+
+
+def test_keyword_field_supports_newline_separated_terms():
+    engine = DetectionEngine("test-job")
+    kw = make_keyword(
+        "kw-multiline",
+        "Laser marking machine\nLaser welding machine\nLaser cleaning machine",
+    )
+    text = "Laser Welding Machine\nKheda, Gujarat\n4 mins ago\nSold Out!"
+    results = engine.evaluate(text, [kw])
     assert len(results) == 1
+    assert results[0].keyword_value == "Laser welding machine"
 
 
 def test_exact_match():

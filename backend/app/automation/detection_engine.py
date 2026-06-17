@@ -110,13 +110,12 @@ class CooldownTracker:
 
 def _keyword_search_terms(value: str, match_type: MatchType) -> list[str]:
     """
-    Dashboard often stores several products in one field separated by commas.
+    Dashboard often stores several products in one field separated by commas/newlines.
     Treat each segment as OR (any one match counts) for non-regex types.
     """
     if match_type == MatchType.regex:
         return [value]
-    raw = value.replace(";", ",")
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    parts = [p.strip() for p in re.split(r"[,;\n\r]+", value or "") if p.strip()]
     return parts if len(parts) > 1 else [value.strip()]
 
 
@@ -176,20 +175,7 @@ class DetectionEngine:
 
         if specific:
             if not all(w in body_words_norm for w in specific):
-                # Controlled family fallback for seller keywords like
-                # "Fiber laser marker" when IndiaMART lists the same fiber-laser
-                # buyer under "Fiber Laser Cutting Machine". This does not make
-                # "Laser marking machine" match all laser machines.
-                if not (
-                    {"fiber", "laser"}.issubset(term_words_norm)
-                    and {"fiber", "laser"}.issubset(body_words_norm)
-                    and (
-                        "engrave" not in body_words_norm
-                        or "engrave" in term_words_norm
-                    )
-                    and len(specific) <= 2
-                ):
-                    return None
+                return None
             if not any(w in body_words_norm for w in specific):
                 return None
             match_word = next((w for w in specific if w in body_words_norm), specific[0])

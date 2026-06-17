@@ -19,6 +19,7 @@ from app.automation.indiamart_leads import (
     collect_buyer_lead_blocks,
     extract_buyer_details,
     is_weak_match_context,
+    lead_identity_matches,
     lead_fingerprint,
     lead_has_buyer_contact,
     lead_match_text,
@@ -767,7 +768,56 @@ class JobRunner:
         ):
             await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
             self._indiamart_action_page_ready = True
-        await scroll_lead_list(page)
+
+        fresh_block = await self._find_current_indiamart_block_for_queue_item(
+            page, item, keywords
+        )
+        if not fresh_block:
+            skip_details = {
+                "keyword": item.keyword_value,
+                "lead_fingerprint": pre_fp,
+                "queued_age_seconds": (
+                    datetime.now(UTC) - item.queued_at
+                ).total_seconds(),
+                "original_block_preview": block.text[:500],
+                "reason": "same product/city/keyword was not visible on live Recent feed",
+            }
+            logger.warning(
+                "Queued lead no longer visible on Recent feed — skipped before click",
+                job_id=self.job_id,
+                keyword=item.keyword_value,
+                fingerprint=pre_fp,
+                queued_age_seconds=skip_details["queued_age_seconds"],
+                block_preview=block.text[:300],
+            )
+            await self._log_event(
+                "lead_click_skipped",
+                f"Skipped '{item.keyword_value}' before click: live Recent feed no longer had the same lead.",
+                EventSeverity.warning,
+                keyword_matched=item.keyword_value,
+                details=skip_details,
+                job_name=job.name,
+                page_url=leads_url,
+            )
+            return
+        block = fresh_block
+        await self._log_event(
+            "lead_click_verified",
+            f"Verified live lead before click: '{item.keyword_value}'.",
+            EventSeverity.info,
+            keyword_matched=item.keyword_value,
+            details={
+                "keyword": item.keyword_value,
+                "queued_fingerprint": pre_fp,
+                "current_fingerprint": lead_fingerprint(block.text, {}),
+                "queue_wait_seconds": (
+                    datetime.now(UTC) - item.queued_at
+                ).total_seconds(),
+                "current_block_preview": block.text[:500],
+            },
+            job_name=job.name,
+            page_url=leads_url,
+        )
         try:
             stale_panel_text = await _read_detail_panel_text(page)
         except Exception:
@@ -776,10 +826,25 @@ class JobRunner:
         clicked = await click_buyer_lead_block(page, block)
         if not clicked:
             logger.warning(
-                "Could not open queued matched buyer row — using feed text only",
+                "Could not open current verified buyer row — skipped before contact extract",
                 job_id=self.job_id,
                 keyword=item.keyword_value,
             )
+            await self._log_event(
+                "lead_click_skipped",
+                f"Skipped '{item.keyword_value}' because verified row could not be opened safely.",
+                EventSeverity.warning,
+                keyword_matched=item.keyword_value,
+                details={
+                    "keyword": item.keyword_value,
+                    "lead_fingerprint": lead_fingerprint(block.text, {}),
+                    "current_block_preview": block.text[:500],
+                    "reason": "verified row click failed",
+                },
+                job_name=job.name,
+                page_url=leads_url,
+            )
+            return
 
         await self._heartbeat()
         lead = await extract_buyer_details(
@@ -950,6 +1015,50 @@ class JobRunner:
                 job_id=self.job_id,
                 partial_saved=partial_saved,
             )
+
+    async def _find_current_indiamart_block_for_queue_item(
+        self,
+        page: Any,
+        item: QueuedIndiaMartLead,
+        keywords: list[Keyword],
+    ) -> BuyerLeadBlock | None:
+        """Re-find a queued lead on the live feed before clicking it."""
+        scan_passes = (
+            {"max_blocks": 18, "visible_only": True},
+            {"max_blocks": 35, "visible_only": False},
+        )
+        for scan in scan_passes:
+            blocks = await collect_buyer_lead_blocks(page, **scan)
+            for block in blocks:
+                if not lead_identity_matches(block.text, item.block.text):
+                    continue
+                match_text = lead_match_text(block.text)
+                results = DetectionEngine(
+                    f"{self.job_id}:fresh_click_guard"
+                ).evaluate(match_text, keywords)
+                result = next(
+                    (
+                        r
+                        for r in results
+                        if r.keyword_id == item.keyword_id
+                        and not is_weak_match_context(
+                            r.context_snippet, r.keyword_value
+                        )
+                    ),
+                    None,
+                )
+                if result:
+                    return block
+            if blocks:
+                logger.info(
+                    "Queued lead not found in live scan pass",
+                    job_id=self.job_id,
+                    keyword=item.keyword_value,
+                    visible_only=scan["visible_only"],
+                    scanned=len(blocks),
+                    fingerprint=item.fingerprint,
+                )
+        return None
 
     async def _handle_detection_results(
         self,

@@ -389,6 +389,26 @@ def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str
     return f"pk:{product}|{city}"
 
 
+def lead_identity_matches(candidate_text: str, expected_text: str) -> bool:
+    """True when a currently visible row is the same lead captured earlier."""
+    if not candidate_text or not expected_text:
+        return False
+    if lead_fingerprint(candidate_text, {}) == lead_fingerprint(expected_text, {}):
+        return True
+
+    candidate_title = _lead_title_for_click(candidate_text).lower()
+    expected_title = _lead_title_for_click(expected_text).lower()
+    if not candidate_title or not expected_title or candidate_title != expected_title:
+        return False
+
+    candidate_address = _parse_address_from_text(candidate_text).lower()
+    expected_address = _parse_address_from_text(expected_text).lower()
+    if candidate_address and expected_address:
+        return candidate_address == expected_address
+
+    return False
+
+
 def sanitize_buyer_name(name: str) -> str:
     """Drop sidebar/nav lines accidentally scraped as buyer name."""
     if not name:
@@ -910,6 +930,17 @@ def _lead_title_for_click(block_text: str) -> str:
         lower = line.lower().strip(" :")
         if (
             lower in ("sold out!", "i am interested", "business use", "probable requirement type")
+            or lower.startswith("buyer filled details")
+            or lower.startswith("buyer also mentioned")
+            or lower.startswith("buyer details")
+            or lower.startswith("category")
+            or lower.startswith("power")
+            or lower.startswith("output power")
+            or lower.startswith("laser power")
+            or lower.startswith("marking area")
+            or lower.startswith("working area")
+            or lower.startswith("material")
+            or lower.startswith("requirement type")
             or line in (",", ">")
             or _CITY_STATE_RE.fullmatch(line)
         ):
@@ -1041,8 +1072,6 @@ def lead_match_text(block_text: str) -> str:
             "automatic grade",
         ):
             continue
-        if _looks_like_product_line(line):
-            add(line)
 
     for pat in (
         r"\bCategory\s*:\s*([^:]+?)(?:\s+(?:Buyer\s+Searched|Laser\s+Power|"
@@ -1392,8 +1421,9 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
     if title:
         try:
             clicked = await page.evaluate(
-                """(title) => {
-                  const t = title.toLowerCase().slice(0, 80);
+                """(args) => {
+                  const t = args.title.toLowerCase().slice(0, 80);
+                  const address = (args.address || '').toLowerCase();
                   const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
                   const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
                   let best = null;
@@ -1401,7 +1431,9 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                   for (const el of nodes) {
                     const raw = (el.innerText || '').trim();
                     if (raw.length < 15 || raw.length > 900) continue;
-                    if (!raw.toLowerCase().includes(t)) continue;
+                    const low = raw.toLowerCase();
+                    if (!low.includes(t)) continue;
+                    if (address && !low.includes(address)) continue;
                     if (!timeRe.test(raw)) continue;
                     const r = el.getBoundingClientRect();
                     const area = r.width * r.height;
@@ -1417,38 +1449,26 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                   }
                   return false;
                 }""",
-                title,
+                {"title": title, "address": _parse_address_from_text(block.text)},
             )
             if clicked:
                 await page.wait_for_timeout(1500)
                 return True
         except Exception:
             pass
-    if block.selector in ("body-split", "card-heuristic", "heuristic") and title:
-        try:
-            await page.get_by_text(title, exact=False).first.click(timeout=5000)
-            await page.wait_for_timeout(1500)
-            return True
-        except Exception:
-            pass
     try:
-        loc = page.locator(block.selector)
-        count = await loc.count()
-        if count <= block.row_index:
-            await loc.first.click(timeout=8000)
-        else:
-            await loc.nth(block.row_index).click(timeout=8000)
-        await page.wait_for_timeout(1500)
-        return True
+        if block.selector not in ("body-split", "card-heuristic", "heuristic"):
+            loc = page.locator(block.selector)
+            count = await loc.count()
+            if count > block.row_index:
+                candidate_text = (await loc.nth(block.row_index).inner_text(timeout=3000)).strip()
+                if lead_identity_matches(candidate_text, block.text):
+                    await loc.nth(block.row_index).click(timeout=8000)
+                    await page.wait_for_timeout(1500)
+                    return True
     except Exception:
-        if title:
-            try:
-                await page.get_by_text(title, exact=False).first.click(timeout=5000)
-                await page.wait_for_timeout(1500)
-                return True
-            except Exception:
-                return False
         return False
+    return False
 
 
 async def _read_detail_panel_text(page: Page) -> str:
@@ -1594,6 +1614,24 @@ def _panel_has_fresh_buyer_response_popup(text: str) -> bool:
     return bool(re.search(rf"\bhi\s+{first}\b", text, re.IGNORECASE))
 
 
+def _panel_address_conflicts(panel_text: str, block_text: str) -> bool:
+    expected = _parse_address_from_text(block_text).lower()
+    if not expected:
+        return False
+    panel = (panel_text or "").lower()
+    if expected in panel:
+        return False
+    parsed_panel_address = _parse_address_from_text(panel_text).lower()
+    if parsed_panel_address:
+        return parsed_panel_address != expected
+    found = [
+        match.group(0).lower()
+        for match in _CITY_STATE_RE.finditer(panel_text or "")
+        if all(_looks_like_address_part(part) for part in match.group(0).split(",", 1))
+    ]
+    return bool(found)
+
+
 def _panel_matches_block(
     panel_text: str, block_text: str, *, stale_panel_text: str = ""
 ) -> bool:
@@ -1604,6 +1642,10 @@ def _panel_matches_block(
     if not panel or len(panel) < 40:
         return False
     panel_changed = _panel_changed_enough(stale_panel_text, panel_text)
+    if stale_panel_text and not panel_changed:
+        return False
+    if _panel_address_conflicts(panel_text, block_text):
+        return False
 
     title = _lead_title_for_click(block_text)
     title_words = _product_context_words(title)

@@ -11,6 +11,7 @@ from app.automation.indiamart_leads import (
     is_buyer_inquiry_block,
     is_plausible_buyer_phone,
     is_weak_match_context,
+    lead_identity_matches,
     lead_fingerprint,
     lead_has_buyer_contact,
     lead_match_text,
@@ -189,6 +190,22 @@ def test_lead_fingerprint_uses_phone_when_present():
     assert fp == "ph:9876543210|laser cleaning machine|pune, maharashtra"
 
 
+def test_lead_identity_requires_same_product_and_city_before_click():
+    expected = (
+        "Laser Marking Machine\n"
+        "Saharanpur, Uttar Pradesh\n"
+        "23 hrs ago\n"
+        "Category: Laser Marking Machine\n"
+        "I am Interested"
+    )
+    same = expected.replace("23 hrs ago", "24 hrs ago")
+    wrong_product = expected.replace("Laser Marking Machine", "Laser Engraving Machine")
+    wrong_city = expected.replace("Saharanpur, Uttar Pradesh", "Moradabad, Uttar Pradesh")
+    assert lead_identity_matches(same, expected)
+    assert not lead_identity_matches(wrong_product, expected)
+    assert not lead_identity_matches(wrong_city, expected)
+
+
 def test_same_phone_different_product_gets_distinct_fingerprint():
     phone = {"buyer_phone": "9876543210"}
     welding = "Laser Welding Machine\nKheda, Gujarat\n4 mins ago"
@@ -218,6 +235,128 @@ def test_accepts_client_laser_welding_sold_out_row():
         "I am Interested"
     )
     assert is_buyer_inquiry_block(text)
+
+
+def test_client_led_laser_marking_with_conveyor_matches_keyword():
+    block = (
+        "LED Laser Marking Machine\n"
+        "Moradabad, Uttar Pradesh\n"
+        "13 hrs ago\n"
+        "Phone Email WhatsApp\n"
+        "Category: Laser Marking Machine\n"
+        "Buyer Searched for laser marking machine with conveyor\n"
+        "Power : 30 W\n"
+        "Marking Area : 200x200 mm\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(block)
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Laser marking machine")]
+    )
+    assert len(results) == 1
+
+
+def test_client_mini_fiber_marking_body_matches_marker_keyword():
+    block = (
+        "Mini Fiber Laser Marking Machine Body\n"
+        "Firozabad, Uttar Pradesh\n"
+        "1 hr ago\n"
+        "Phone WhatsApp Address\n"
+        "Category: Fiber Laser Marker\n"
+        "Output Power : 30 W\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(block)
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Fiber laser marker")]
+    )
+    assert len(results) == 1
+
+
+def test_client_uv_marking_machine_matches_marking_keyword():
+    block = (
+        "Dual-head UV Laser Marking Machine 5watt\n"
+        "Moradabad, Uttar Pradesh\n"
+        "15 hrs ago\n"
+        "Phone Email WhatsApp Business Address\n"
+        "Category: UV Laser Marking Machine\n"
+        "Marking Area : 100x100 mm\n"
+        "Material : Glass / Ceramics\n"
+        "Buyer Filled Details : 100w, 200x200 mm, Metals, Paper / Wood\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    assert is_buyer_inquiry_block(block)
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Laser marking machine")]
+    )
+    assert len(results) == 1
+
+
+def test_buyer_filled_details_do_not_trigger_unrelated_keyword():
+    block = (
+        "Laser Marking Machine\n"
+        "Saharanpur, Uttar Pradesh\n"
+        "23 hrs ago\n"
+        "Phone Email WhatsApp Business\n"
+        "Category: Laser Marking Machine\n"
+        "Power : 80 W\n"
+        "Marking Area : 200x200 mm\n"
+        "Buyer Filled Details : Buyer also mentioned a requirement for an "
+        "automatic double cutter machine.\n"
+        "Requirement Type : Business Use\n"
+        "Sold Out!\n"
+        "I am Interested"
+    )
+    match_text = lead_match_text(block)
+    assert "double cutter" not in match_text.lower()
+    assert "marking area" not in match_text.lower()
+    assert (
+        DetectionEngine("test-job").evaluate(
+            match_text, [make_keyword("automatic double cutter machine")]
+        )
+        == []
+    )
+    assert len(
+        DetectionEngine("test-job").evaluate(
+            match_text, [make_keyword("Laser marking machine")]
+        )
+    ) == 1
+
+
+def test_client_log_engraver_rows_do_not_match_marking_keywords():
+    keywords = [
+        make_keyword("Laser marking machine"),
+        make_keyword("Laser welding machine"),
+        make_keyword("Laser cleaning machine"),
+        make_keyword("Fiber laser marker"),
+    ]
+    rows = (
+        "Twotrees Tts-55 Pro Diode Laser Engraver\n"
+        "Bengaluru, Karnataka\n"
+        "3 hrs ago\n"
+        "Engraving Machines > Laser Engraving Machines\n"
+        "Laser Power : 10 W\n"
+        "I am Interested\n"
+        "CO2 Laser Engraving Machine\n"
+        "Shivamogga, Karnataka\n"
+        "54 mins ago\n"
+        "Engraving Machines > Co2 Laser Engraving Machine\n"
+        "Laser Power : 60 W\n"
+        "I am Interested"
+    )
+    blocks = _blocks_from_body_text(rows)
+    assert len(blocks) == 2
+    for block in blocks:
+        assert (
+            DetectionEngine("test-job").evaluate(lead_match_text(block.text), keywords)
+            == []
+        )
 
 
 def test_accepts_mumbai_marking_machine_row():
@@ -338,6 +477,32 @@ def test_accepts_matching_detail_panel_for_clicked_lead_title():
     )
     panel = "Laser Marking Machine\nGurugram, Haryana\nPhone 9876543210"
     assert _panel_matches_block(panel, block)
+
+
+def test_rejects_unchanged_stale_panel_after_click():
+    block = (
+        "Laser Marking Machine\n"
+        "Gurugram, Haryana\n"
+        "2 hrs ago\n"
+        "Category: Laser Marking Machine\n"
+        "Power: 50 W"
+    )
+    stale_panel = "Laser Marking Machine\nGurugram, Haryana\nPhone 9876543210"
+    assert not _panel_matches_block(
+        stale_panel, block, stale_panel_text=stale_panel
+    )
+
+
+def test_rejects_same_title_panel_for_different_city():
+    block = (
+        "Laser Marking Machine\n"
+        "Gurugram, Haryana\n"
+        "2 hrs ago\n"
+        "Category: Laser Marking Machine\n"
+        "Power: 50 W"
+    )
+    wrong_panel = "Laser Marking Machine\nMoradabad, Uttar Pradesh\nPhone 9876543210"
+    assert not _panel_matches_block(wrong_panel, block)
 
 
 def test_accepts_fresh_contact_popup_without_product_title():
