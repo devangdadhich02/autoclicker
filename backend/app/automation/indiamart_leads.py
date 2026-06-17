@@ -1429,6 +1429,28 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                   const titleNeedle = norm(t);
                   const addressNeedles = addressParts.map(norm).filter(Boolean);
                   const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
+                  const badClickText = /contact|interested|call|whatsapp|sold\\s*out|view\\s*number|mobile|phone/i;
+                  const dispatchClick = (el) => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 2 || r.height < 2) return false;
+                    const x = r.left + Math.min(Math.max(r.width / 2, 6), Math.max(r.width - 6, 1));
+                    const y = r.top + Math.min(Math.max(r.height / 2, 6), Math.max(r.height - 6, 1));
+                    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                      const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+                      try {
+                        if (type.startsWith('pointer')) {
+                          el.dispatchEvent(new PointerEvent(type, { ...opts, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                        } else {
+                          el.dispatchEvent(new MouseEvent(type, opts));
+                        }
+                      } catch (e) {
+                        el.dispatchEvent(new MouseEvent(type.replace('pointer', 'mouse'), opts));
+                      }
+                    }
+                    try { el.click(); } catch (e) {}
+                    return true;
+                  };
                   const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
                   let best = null;
                   let bestArea = Infinity;
@@ -1448,9 +1470,26 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                     }
                   }
                   if (best) {
-                    best.scrollIntoView({ block: 'center' });
-                    best.click();
-                    return true;
+                    best.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    const clickable = [
+                      ...best.querySelectorAll('a, button, [role="button"], [role="link"], [onclick], [class*="card"], [class*="lead"], [class*="inq"]')
+                    ];
+                    const targets = [];
+                    for (const el of clickable) {
+                      const text = (el.innerText || el.textContent || '').trim();
+                      if (!text || text.length > 1200) continue;
+                      if (badClickText.test(text)) continue;
+                      const compactText = norm(text);
+                      if (compactText.includes(titleNeedle) || addressNeedles.some(part => compactText.includes(part))) {
+                        targets.push(el);
+                      }
+                    }
+                    targets.push(best);
+                    for (const target of targets) {
+                      if (dispatchClick(target)) {
+                        return true;
+                      }
+                    }
                   }
                   return false;
                 }""",
