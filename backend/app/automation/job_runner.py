@@ -866,6 +866,31 @@ class JobRunner:
         )
         await self._heartbeat()
         if not lead_has_buyer_contact(lead):
+            contact_reason = lead.get(
+                "contact_status_reason",
+                "contact not revealed on IndiaMART",
+            )
+            if contact_reason == "detail panel did not match clicked lead":
+                self._partial_contact_retry_until[pre_fp] = (
+                    datetime.now(UTC)
+                    + timedelta(seconds=_CLICK_FAILURE_RETRY_SECONDS)
+                )
+                await self._log_event(
+                    "lead_click_skipped",
+                    f"Skipped '{item.keyword_value}' because IndiaMART did not open the verified lead detail panel.",
+                    EventSeverity.warning,
+                    keyword_matched=item.keyword_value,
+                    details={
+                        "keyword": item.keyword_value,
+                        "lead_fingerprint": pre_fp,
+                        "current_block_preview": block.text[:500],
+                        "extracted": lead,
+                        "reason": contact_reason,
+                    },
+                    job_name=job.name,
+                    page_url=leads_url,
+                )
+                return
             logger.warning(
                 "Buyer phone/email not revealed — queued lead saved as partial",
                 job_id=self.job_id,
@@ -877,10 +902,6 @@ class JobRunner:
                 seconds=_PARTIAL_CONTACT_RETRY_SECONDS
             )
             self._partial_contact_retry_until[pre_fp] = retry_at
-            contact_reason = lead.get(
-                "contact_status_reason",
-                "contact not revealed on IndiaMART",
-            )
             if partial_fp not in self._seen_lead_fingerprints:
                 self._seen_lead_fingerprints.add(partial_fp)
                 partial_details = {

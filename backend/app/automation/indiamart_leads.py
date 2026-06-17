@@ -1815,6 +1815,7 @@ async def extract_buyer_details(
             reveal_clicked=False,
             contact_signal_seen=False,
         )
+        return sanitize_lead_contacts(lead, block_text, "")
 
     # Extract better product title from panel text if available
     if panel_matches_block and panel_text and len(panel_text) > 50:

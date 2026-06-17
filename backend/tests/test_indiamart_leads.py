@@ -1,5 +1,8 @@
 import types
 
+import pytest
+
+import app.automation.indiamart_leads as indiamart_leads
 from app.automation.detection_engine import DetectionEngine
 from app.automation.indiamart_leads import (
     _apply_panel_text_to_lead,
@@ -8,6 +11,7 @@ from app.automation.indiamart_leads import (
     _panel_matches_block,
     _parse_address_from_text,
     _split_candidate_text_into_cards,
+    extract_buyer_details,
     is_buyer_inquiry_block,
     is_plausible_buyer_phone,
     is_weak_match_context,
@@ -503,6 +507,45 @@ def test_rejects_same_title_panel_for_different_city():
     )
     wrong_panel = "Laser Marking Machine\nMoradabad, Uttar Pradesh\nPhone 9876543210"
     assert not _panel_matches_block(wrong_panel, block)
+
+
+@pytest.mark.asyncio
+async def test_extract_stops_before_reveal_when_detail_panel_mismatches(monkeypatch):
+    block = (
+        "UV Laser Marking Machine\n"
+        "Anantapur, Andhra Pradesh\n"
+        "1 hr ago\n"
+        "Category: UV Laser Marking Machine"
+    )
+    stale_shell = (
+        "IndiaMART\nBuy Leads\nLead Manager\nContact Buyer\n"
+        "NC-Scriber/Lettering Machine and Drafting Aid"
+    )
+    reveal_called = False
+
+    async def fake_wait_for_detail_panel_after_click(*args, **kwargs):
+        return stale_shell
+
+    async def fake_reveal_contact(*args, **kwargs):
+        nonlocal reveal_called
+        reveal_called = True
+        return True
+
+    monkeypatch.setattr(
+        indiamart_leads,
+        "_wait_for_detail_panel_after_click",
+        fake_wait_for_detail_panel_after_click,
+    )
+    monkeypatch.setattr(
+        indiamart_leads,
+        "reveal_indiamart_buyer_contact",
+        fake_reveal_contact,
+    )
+
+    lead = await extract_buyer_details(object(), block)
+    assert not reveal_called
+    assert lead["contact_status_reason"] == "detail panel did not match clicked lead"
+    assert "buyer_phone" not in lead
 
 
 def test_accepts_fresh_contact_popup_without_product_title():
