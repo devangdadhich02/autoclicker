@@ -29,6 +29,7 @@ from app.automation.indiamart_page import (
     is_indiamart_logged_out_body,
     is_indiamart_marketing_landing,
 )
+from app.automation.job_runner import _is_non_recent_indiamart_feed
 from app.models.keyword import MatchType
 
 
@@ -486,6 +487,22 @@ def test_marketing_landing_detected():
 
 
 def test_rejects_indiamart_similar_leads_url_as_recent_feed():
+    similar_url = (
+        "https://seller.indiamart.com/bltxn/buyersearch/?"
+        "ss=CO2+Laser+Cutting+Machine&screen=view_similar_leads"
+    )
+    relevant_url = "https://seller.indiamart.com/bltxn/?pref=relevant"
+    recent_url = "https://seller.indiamart.com/bltxn/?pref=recent"
+
+    assert _is_non_recent_buy_leads_url(similar_url)
+    assert _is_non_recent_indiamart_feed(similar_url)
+    assert _is_non_recent_buy_leads_url(relevant_url)
+    assert _is_non_recent_indiamart_feed(relevant_url)
+    assert not _is_non_recent_buy_leads_url(recent_url)
+    assert not _is_non_recent_indiamart_feed(recent_url)
+
+
+def test_page_helper_rejects_indiamart_similar_leads_url_as_recent_feed():
     assert _is_non_recent_buy_leads_url(
         "https://seller.indiamart.com/bltxn/buyersearch/?"
         "ss=CO2+Laser+Cutting+Machine&screen=view_similar_leads"

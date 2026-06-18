@@ -116,7 +116,15 @@ def _indiamart_recent_leads_url(target_url: str | None = None) -> str:
 def _is_non_recent_indiamart_feed(url: str | None) -> bool:
     u = (url or "").lower()
     return "seller.indiamart.com" in u and "bltxn" in u and any(
-        pref in u for pref in ("pref=relevant", "pref=other_leads", "pref=all")
+        marker in u
+        for marker in (
+            "pref=relevant",
+            "pref=other_leads",
+            "pref=all",
+            "/buyersearch/",
+            "screen=view_similar_leads",
+            "view_similar_leads",
+        )
     )
 
 
@@ -360,35 +368,20 @@ class JobRunner:
                 await self._handle_session_expired(page.url)
                 return
         if _is_non_recent_indiamart_feed(page.url):
-            try:
-                current_body = await read_indiamart_page_text(page, 4_000)
-            except Exception:
-                current_body = ""
-            if re.search(
-                r"(?:just\s+now|\d+\s*(?:min|mins|hr|hrs|hour|hours|day|days)\s*ago)",
-                current_body,
-                re.I,
-            ):
-                logger.info(
-                    "IndiaMART URL is non-recent but buyer rows are visible — preserving SPA feed",
-                    job_id=self.job_id,
-                    url=page.url,
-                )
-            else:
-                leads_url = _indiamart_recent_leads_url(job.target_url)
+            leads_url = _indiamart_recent_leads_url(job.target_url)
+            logger.warning(
+                "IndiaMART non-recent feed detected before scan — forcing Recent",
+                job_id=self.job_id,
+                url=page.url,
+            )
+            await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
+            if _is_non_recent_indiamart_feed(page.url):
                 logger.warning(
-                    "IndiaMART non-recent feed detected before scan — forcing Recent",
+                    "IndiaMART non-recent feed still open — skipping scan to avoid wrong leads",
                     job_id=self.job_id,
                     url=page.url,
                 )
-                await ensure_bltxn_leads_page(page, leads_url, heartbeat=self._heartbeat)
-                if _is_non_recent_indiamart_feed(page.url):
-                    logger.warning(
-                        "IndiaMART non-recent feed still open — skipping scan to avoid wrong leads",
-                        job_id=self.job_id,
-                        url=page.url,
-                    )
-                    return
+                return
         if _is_non_recent_indiamart_feed(page.url):
             leads_url = _indiamart_recent_leads_url(job.target_url)
             logger.info(
