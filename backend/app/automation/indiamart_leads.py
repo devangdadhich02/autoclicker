@@ -112,6 +112,29 @@ _GENERIC_MATCH_WORDS = frozenset(
         "equipment",
     }
 )
+_IDENTITY_GENERIC_PRODUCT_WORDS = frozenset(
+    {
+        "laser",
+        "machine",
+        "machines",
+        "system",
+        "systems",
+        "equipment",
+        "marking",
+        "marker",
+        "welding",
+        "welder",
+        "cleaning",
+        "cleaner",
+        "cutting",
+        "cutter",
+        "engraving",
+        "engraver",
+        "rust",
+        "removal",
+        "industrial",
+    }
+)
 
 _PRODUCT_LINE_RE = re.compile(
     r"\b(?:laser|machine|machines|cleaning|cleaner|welding|welder|marking|marker|"
@@ -389,6 +412,88 @@ def lead_fingerprint(block_text: str, lead: dict[str, str] | None = None) -> str
     return f"pk:{product}|{city}"
 
 
+def _normalize_identity_title(title: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", title.lower())).strip()
+
+
+def _identity_product_tokens(title: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", _normalize_identity_title(title))
+        if len(token) >= 2
+    }
+
+
+def _identity_discriminator_tokens(title: str) -> set[str]:
+    return {
+        token
+        for token in _identity_product_tokens(title)
+        if token not in _IDENTITY_GENERIC_PRODUCT_WORDS
+    }
+
+
+def _lead_identity_titles(block_text: str) -> list[str]:
+    titles: list[str] = []
+
+    def add(title: str) -> None:
+        clean = re.sub(r"^category\s*:\s*", "", (title or "").strip(), flags=re.I)
+        clean = re.sub(r"\s+", " ", clean.strip(" ,-|:"))
+        if len(clean) < 8 or _is_bad_product_title(clean):
+            return
+        if ":" in clean:
+            return
+        if _looks_like_address_part(clean) and not _PRODUCT_LINE_RE.search(clean):
+            return
+        norm = _normalize_identity_title(clean)
+        if norm and norm not in {_normalize_identity_title(t) for t in titles}:
+            titles.append(clean[:120])
+
+    add(_lead_title_for_click(block_text))
+    lines = [line.strip() for line in block_text.splitlines() if line.strip()]
+    for idx, line in enumerate(lines):
+        low = line.lower().strip(" :")
+        if low == "category" and idx + 1 < len(lines):
+            add(lines[idx + 1])
+        if low.startswith("category:"):
+            add(line.split(":", 1)[1])
+        if _looks_like_product_line(line):
+            add(line)
+    one = " ".join(block_text.split())
+    for match in re.finditer(r">\s*([^>]+?)(?:\s+[A-Z][A-Za-z ]+\s*:|\s*$)", one):
+        add(match.group(1))
+    return titles
+
+
+def _product_titles_compatible(candidate_title: str, expected_title: str) -> bool:
+    candidate_norm = _normalize_identity_title(candidate_title)
+    expected_norm = _normalize_identity_title(expected_title)
+    if not candidate_norm or not expected_norm:
+        return False
+    if candidate_norm == expected_norm:
+        return True
+    if candidate_norm in expected_norm or expected_norm in candidate_norm:
+        return True
+
+    candidate_tokens = _identity_product_tokens(candidate_title)
+    expected_tokens = _identity_product_tokens(expected_title)
+    if not candidate_tokens or not expected_tokens:
+        return False
+    shared = candidate_tokens & expected_tokens
+    shorter = min(len(candidate_tokens), len(expected_tokens))
+    if shorter <= 0 or len(shared) / shorter < 0.75 or len(shared) < 3:
+        return False
+
+    candidate_discriminators = _identity_discriminator_tokens(candidate_title)
+    expected_discriminators = _identity_discriminator_tokens(expected_title)
+    if (
+        candidate_discriminators
+        and expected_discriminators
+        and not (candidate_discriminators & expected_discriminators)
+    ):
+        return False
+    return True
+
+
 def lead_identity_matches(candidate_text: str, expected_text: str) -> bool:
     """True when a currently visible row is the same lead captured earlier."""
     if not candidate_text or not expected_text:
@@ -398,13 +503,33 @@ def lead_identity_matches(candidate_text: str, expected_text: str) -> bool:
 
     candidate_title = _lead_title_for_click(candidate_text).lower()
     expected_title = _lead_title_for_click(expected_text).lower()
-    if not candidate_title or not expected_title or candidate_title != expected_title:
+    if not candidate_title or not expected_title:
         return False
 
     candidate_address = _parse_address_from_text(candidate_text).lower()
     expected_address = _parse_address_from_text(expected_text).lower()
     if candidate_address and expected_address:
-        return candidate_address == expected_address
+        if candidate_address != expected_address:
+            return False
+        candidate_titles = _lead_identity_titles(candidate_text)
+        expected_titles = _lead_identity_titles(expected_text)
+        candidate_discriminators = set().union(
+            *(_identity_discriminator_tokens(title) for title in candidate_titles)
+        )
+        expected_discriminators = set().union(
+            *(_identity_discriminator_tokens(title) for title in expected_titles)
+        )
+        if (
+            candidate_discriminators
+            and expected_discriminators
+            and not (candidate_discriminators & expected_discriminators)
+        ):
+            return False
+        return any(
+            _product_titles_compatible(candidate, expected)
+            for candidate in candidate_titles
+            for expected in expected_titles
+        )
 
     return False
 

@@ -397,7 +397,6 @@ class JobRunner:
                 target_url=leads_url,
                 url=page.url,
             )
-        self._ensure_indiamart_action_page_warm(browser, job)
         now = datetime.now(UTC)
         deep_scan_due = (
             self._last_deep_indiamart_scan_at is None
@@ -522,6 +521,10 @@ class JobRunner:
                 queue_size=len(self._indiamart_lead_queue),
                 matched_previews=[m[0].text[:240] for m in matches[:3]],
             )
+            if await self._try_drain_indiamart_queue_on_current_page(
+                page, job, keywords, action_rules, browser
+            ):
+                return
         self._ensure_indiamart_action_worker(browser, job, keywords, action_rules)
 
     def _enqueue_indiamart_matches(
@@ -699,6 +702,41 @@ class JobRunner:
                 )
                 await self._heartbeat()
 
+    async def _try_drain_indiamart_queue_on_current_page(
+        self,
+        page: Any,
+        job: AutomationJob,
+        keywords: list[Keyword],
+        action_rules: list[ActionRule],
+        browser: BrowserManager,
+    ) -> bool:
+        """Hot path: click leads on the same freshly-scanned page to avoid feed races."""
+        if not self._indiamart_lead_queue:
+            return False
+        if self._indiamart_action_lock.locked():
+            return False
+        if self._indiamart_action_task and not self._indiamart_action_task.done():
+            return False
+
+        async with self._indiamart_action_lock:
+            leads_url = _indiamart_recent_leads_url(job.target_url)
+            processed = 0
+            while self._indiamart_lead_queue and not self._shutdown_event.is_set():
+                item = self._indiamart_lead_queue.pop(0)
+                self._queued_lead_fingerprints.discard(item.fingerprint)
+                await self._process_queued_indiamart_lead(
+                    page, item, job, keywords, action_rules, browser, leads_url
+                )
+                processed += 1
+                await self._heartbeat()
+            if processed:
+                logger.info(
+                    "IndiaMART queue drained on scanner page",
+                    job_id=self.job_id,
+                    processed=processed,
+                )
+            return processed > 0
+
     async def _process_queued_indiamart_lead(
         self,
         page: Any,
@@ -763,8 +801,7 @@ class JobRunner:
         except Exception:
             current_url = ""
         if (
-            not self._indiamart_action_page_ready
-            or "seller.indiamart.com" not in current_url
+            "seller.indiamart.com" not in current_url
             or "bltxn" not in current_url
             or "pref=recent" not in current_url
         ):

@@ -210,6 +210,53 @@ def test_lead_identity_requires_same_product_and_city_before_click():
     assert not lead_identity_matches(wrong_city, expected)
 
 
+def test_lead_identity_accepts_location_first_category_variant():
+    expected = (
+        "Anantapur\n"
+        ",\n"
+        "Andhra Pradesh\n"
+        "19 hrs ago\n"
+        "Laser Marking Machine\n"
+        ">\n"
+        "UV Laser Marking Machine\n"
+        "Power\n"
+        ":\n"
+        "5 W\n"
+        "Requirement Type\n"
+        ":\n"
+        "Business Use"
+    )
+    current = (
+        "Laser Marking Machine\n"
+        "Anantapur, Andhra Pradesh\n"
+        "20 hrs ago\n"
+        "Category: Laser Marking Machine\n"
+        "Power : 5 W\n"
+        "I am Interested"
+    )
+    assert lead_identity_matches(current, expected)
+
+
+def test_lead_identity_rejects_conflicting_explicit_subtype_same_city():
+    expected = (
+        "Anantapur\n"
+        ",\n"
+        "Andhra Pradesh\n"
+        "19 hrs ago\n"
+        "Laser Marking Machine\n"
+        ">\n"
+        "UV Laser Marking Machine"
+    )
+    wrong_subtype = (
+        "Fiber Laser Marking Machine\n"
+        "Anantapur, Andhra Pradesh\n"
+        "19 hrs ago\n"
+        "Category: Fiber Laser Marking Machine\n"
+        "I am Interested"
+    )
+    assert not lead_identity_matches(wrong_subtype, expected)
+
+
 def test_same_phone_different_product_gets_distinct_fingerprint():
     phone = {"buyer_phone": "9876543210"}
     welding = "Laser Welding Machine\nKheda, Gujarat\n4 mins ago"
