@@ -958,20 +958,9 @@ async def ensure_bltxn_leads_page(
                 logger.info(f"After sidebar click - has_time_ago: {has_time_ago}, body_length: {len(body)}")
                 
                 if has_time_ago:
-                    # SPA loaded successfully. Try to put the tab on Recent without
-                    # doing a hard URL reload, because direct bltxn navigation can
-                    # leave IndiaMART stuck on a nav-only shell.
-                    recent_clicked = await click_recent_buy_leads_tab(page)
                     logger.info(
-                        "Recent tab clicked after sidebar recovery: %s",
-                        recent_clicked,
+                        "Sidebar recovery loaded buyer rows; preserving current SPA feed"
                     )
-                    if recent_clicked:
-                        await page.wait_for_timeout(1000)
-                        refreshed_body = await read_indiamart_page_text(page, 4_000)
-                        if bool(_TIME_AGO_RE.search(refreshed_body)):
-                            body = refreshed_body
-                            has_time_ago = True
                     await scroll_lead_list(page)
                     break
 
