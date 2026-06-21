@@ -411,6 +411,26 @@ def test_client_log_engraver_rows_do_not_match_marking_keywords():
         )
 
 
+def test_sculpfun_engraver_search_row_does_not_match_marking_keyword():
+    block = (
+        "Sculpfun S9 5w Laser Engraving Cutting Machine\n"
+        "Bengaluru\n"
+        ",\n"
+        "Karnataka\n"
+        "13 hrs ago\n"
+        "Engraving Machines\n"
+        ">\n"
+        "Laser Engraving Machines\n"
+        "Buyer searched for Creality laser engraver and Sculpfun S9\n"
+        "Laser Power : 5 W\n"
+        "I am Interested"
+    )
+    results = DetectionEngine("test-job").evaluate(
+        lead_match_text(block), [make_keyword("Laser marking machine")]
+    )
+    assert results == []
+
+
 def test_accepts_mumbai_marking_machine_row():
     text = (
         "30W Laser Marking Machine\n"

@@ -864,7 +864,9 @@ class JobRunner:
         except Exception:
             stale_panel_text = ""
 
-        clicked = await click_buyer_lead_block(page, block)
+        clicked = await click_buyer_lead_block(
+            page, block, stale_panel_text=stale_panel_text
+        )
         if not clicked:
             logger.warning(
                 "Could not open current verified buyer row — skipped before contact extract",
@@ -889,6 +891,33 @@ class JobRunner:
                 page_url=leads_url,
             )
             return
+
+        clicked_details = {
+            "keyword": item.keyword_value,
+            "lead_fingerprint": lead_fingerprint(block.text, {}),
+            "queued_fingerprint": pre_fp,
+            "queue_wait_seconds": (
+                datetime.now(UTC) - item.queued_at
+            ).total_seconds(),
+            "clicked_block_preview": block.text[:500],
+        }
+        logger.info(
+            "Matched IndiaMART lead contact button clicked",
+            job_id=self.job_id,
+            keyword=item.keyword_value,
+            fingerprint=clicked_details["lead_fingerprint"],
+            queue_wait_seconds=clicked_details["queue_wait_seconds"],
+            clicked_preview=block.text[:300],
+        )
+        await self._log_event(
+            "lead_contact_clicked",
+            f"Clicked matched lead button for '{item.keyword_value}'.",
+            EventSeverity.info,
+            keyword_matched=item.keyword_value,
+            details=clicked_details,
+            job_name=job.name,
+            page_url=leads_url,
+        )
 
         await self._heartbeat()
         lead = await extract_buyer_details(

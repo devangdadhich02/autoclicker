@@ -1244,6 +1244,29 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
     """Click any detail-panel control that likely reveals buyer phone/name."""
     clicked_any = False
 
+    async def panel_scopes() -> list:
+        scopes = []
+        for sel in (
+            "[role='dialog']",
+            ".inqry-detail-panel",
+            ".inquiry-detail",
+            ".byr-detail",
+            ".msg-detail-panel",
+            "[class*='detail-panel']",
+            "[class*='contact-detail']",
+            "[class*='buyer-info']",
+            "[class*='Detail']",
+            "aside",
+            "main",
+        ):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    scopes.append(loc)
+            except Exception:
+                continue
+        return scopes
+
     # Strategy 1: CSS selectors + Playwright has-text (most reliable, fastest)
     contact_selectors = [
         # data-testid selectors
@@ -1276,13 +1299,16 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
 
     for sel in contact_selectors:
         try:
-            loc = page.locator(sel).first
-            if await loc.count() > 0:
-                await loc.scroll_into_view_if_needed(timeout=2000)
-                await loc.click(timeout=4000)
-                await page.wait_for_timeout(2500)
-                clicked_any = True
-                logger.info("Clicked contact reveal button selector=%s", sel)
+            for scope in await panel_scopes():
+                loc = scope.locator(sel).first
+                if await loc.count() > 0:
+                    await loc.scroll_into_view_if_needed(timeout=2000)
+                    await loc.click(timeout=4000)
+                    await page.wait_for_timeout(2500)
+                    clicked_any = True
+                    logger.info("Clicked contact reveal button selector=%s", sel)
+                    break
+            if clicked_any:
                 break
         except Exception:
             continue
@@ -1295,46 +1321,70 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
         for label in _CONTACT_REVEAL_LABELS:
             for role in ("button", "link"):
                 try:
-                    loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
-                    n = await loc.count()
-                    for i in range(min(n, 2)):
-                        try:
-                            el = loc.nth(i)
-                            await el.scroll_into_view_if_needed(timeout=3000)
-                            await el.click(timeout=4000)
-                            await page.wait_for_timeout(1800)
-                            clicked_any = True
-                        except Exception:
-                            continue
+                    for scope in await panel_scopes():
+                        loc = scope.get_by_role(
+                            role, name=re.compile(re.escape(label), re.I)
+                        )
+                        n = await loc.count()
+                        for i in range(min(n, 2)):
+                            try:
+                                el = loc.nth(i)
+                                await el.scroll_into_view_if_needed(timeout=3000)
+                                await el.click(timeout=4000)
+                                await page.wait_for_timeout(1800)
+                                clicked_any = True
+                                break
+                            except Exception:
+                                continue
+                        if clicked_any:
+                            break
                 except Exception:
                     pass
+                if clicked_any:
+                    break
+            if clicked_any:
+                break
 
     if not clicked_any:
         # Strategy 3: Some IndiaMART rows reveal contact only after the interest CTA.
         for label in _INTEREST_BUTTON_LABELS:
             for role in ("button", "link"):
                 try:
-                    loc = page.get_by_role(role, name=re.compile(re.escape(label), re.I))
-                    n = await loc.count()
-                    for i in range(min(n, 2)):
-                        try:
-                            el = loc.nth(i)
-                            await el.scroll_into_view_if_needed(timeout=3000)
-                            await el.click(timeout=5000)
-                            await page.wait_for_timeout(2200)
-                            clicked_any = True
-                        except Exception:
-                            continue
+                    for scope in await panel_scopes():
+                        loc = scope.get_by_role(
+                            role, name=re.compile(re.escape(label), re.I)
+                        )
+                        n = await loc.count()
+                        for i in range(min(n, 2)):
+                            try:
+                                el = loc.nth(i)
+                                await el.scroll_into_view_if_needed(timeout=3000)
+                                await el.click(timeout=5000)
+                                await page.wait_for_timeout(2200)
+                                clicked_any = True
+                                break
+                            except Exception:
+                                continue
+                        if clicked_any:
+                            break
                 except Exception:
                     pass
+                if clicked_any:
+                    break
+            if clicked_any:
+                break
     try:
-        broad = page.locator("button, a, [role='button']").filter(
-            has_text=re.compile(
-                r"contact|mobile|phone|number|call|whatsapp|buyer|detail",
-                re.I,
+        broad = None
+        for scope in await panel_scopes():
+            broad = scope.locator("button, a, [role='button']").filter(
+                has_text=re.compile(
+                    r"contact|mobile|phone|number|call|whatsapp|buyer|detail",
+                    re.I,
+                )
             )
-        )
-        n = await broad.count()
+            if await broad.count() > 0:
+                break
+        n = await broad.count() if broad is not None else 0
         for i in range(min(n, 8)):
             try:
                 el = broad.nth(i)
@@ -1360,10 +1410,11 @@ async def reveal_indiamart_buyer_contact(page: Page) -> bool:
               const skip = /interested|sold out|share|close|back|cancel|submit|search|filter|login|sign in|recent/i;
               const want = /contact|mobile|phone|number|call|whatsapp|buyer|detail|view/i;
               const roots = [
+                document.querySelector('[role="dialog"]'),
                 document.querySelector('[class*="detail"]'),
                 document.querySelector('[class*="Detail"]'),
+                document.querySelector('[class*="contact"]'),
                 document.querySelector('main'),
-                document.body,
               ].filter(Boolean);
               let clicked = 0;
               for (const root of roots) {
@@ -1541,7 +1592,9 @@ async def _scrape_contact_from_dom(page: Page) -> dict[str, str]:
     return out
 
 
-async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
+async def click_buyer_lead_block(
+    page: Page, block: BuyerLeadBlock, *, stale_panel_text: str = ""
+) -> bool:
     title = _lead_title_for_click(block.text)
     if title:
         try:
@@ -1554,13 +1607,13 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                   const titleNeedle = norm(t);
                   const addressNeedles = addressParts.map(norm).filter(Boolean);
                   const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
-                  const badClickText = /contact|interested|call|whatsapp|sold\\s*out|view\\s*number|mobile|phone/i;
+                  const preferredClickText = /contact\\s*buyer|contact\\s*now|view\\s*(?:mobile|number|phone|contact)|show\\s*(?:mobile|number|phone|contact)|get\\s*contact|call\\s*(?:buyer|now)|phone|mobile|whatsapp|i\\s*am\\s*interested/i;
                   const dispatchClick = (el) => {
+                    el.scrollIntoView({ block: 'center', inline: 'nearest' });
                     const r = el.getBoundingClientRect();
                     if (r.width < 2 || r.height < 2) return false;
                     const x = r.left + Math.min(Math.max(r.width / 2, 6), Math.max(r.width - 6, 1));
                     const y = r.top + Math.min(Math.max(r.height / 2, 6), Math.max(r.height - 6, 1));
-                    el.scrollIntoView({ block: 'center', inline: 'nearest' });
                     for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
                       const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
                       try {
@@ -1597,19 +1650,21 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                   if (best) {
                     best.scrollIntoView({ block: 'center', inline: 'nearest' });
                     const clickable = [
-                      ...best.querySelectorAll('a, button, [role="button"], [role="link"], [onclick], [class*="card"], [class*="lead"], [class*="inq"]')
+                      ...best.querySelectorAll('a, button, [role="button"], [role="link"], [onclick], [tabindex], [class*="contact"], [class*="mobile"], [class*="phone"], [class*="card"], [class*="lead"], [class*="inq"]')
                     ];
-                    const targets = [];
+                    const preferredTargets = [];
+                    const identityTargets = [];
                     for (const el of clickable) {
                       const text = (el.innerText || el.textContent || '').trim();
                       if (!text || text.length > 1200) continue;
-                      if (badClickText.test(text)) continue;
                       const compactText = norm(text);
-                      if (compactText.includes(titleNeedle) || addressNeedles.some(part => compactText.includes(part))) {
-                        targets.push(el);
+                      if (preferredClickText.test(text)) {
+                        preferredTargets.push(el);
+                      } else if (compactText.includes(titleNeedle) || addressNeedles.some(part => compactText.includes(part))) {
+                        identityTargets.push(el);
                       }
                     }
-                    targets.push(best);
+                    const targets = [...preferredTargets, ...identityTargets, best];
                     for (const target of targets) {
                       if (dispatchClick(target)) {
                         return true;
@@ -1621,8 +1676,23 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
                 {"title": title, "address": _parse_address_from_text(block.text)},
             )
             if clicked:
-                await page.wait_for_timeout(1500)
-                return True
+                await page.wait_for_timeout(1800)
+                panel_text = await _wait_for_detail_panel_after_click(
+                    page,
+                    block.text,
+                    stale_panel_text=stale_panel_text,
+                    timeout_ms=2500,
+                )
+                if _panel_matches_block(
+                    panel_text, block.text, stale_panel_text=stale_panel_text
+                ):
+                    return True
+                logger.warning(
+                    "Verified lead click did not open matching panel; trying locator fallback "
+                    "block_title=%r panel_preview=%r",
+                    title,
+                    panel_text[:180],
+                )
         except Exception:
             pass
     try:
@@ -1632,9 +1702,17 @@ async def click_buyer_lead_block(page: Page, block: BuyerLeadBlock) -> bool:
             if count > block.row_index:
                 candidate_text = (await loc.nth(block.row_index).inner_text(timeout=3000)).strip()
                 if lead_identity_matches(candidate_text, block.text):
-                    await loc.nth(block.row_index).click(timeout=8000)
-                    await page.wait_for_timeout(1500)
-                    return True
+                    await loc.nth(block.row_index).click(timeout=8000, force=True)
+                    await page.wait_for_timeout(1800)
+                    panel_text = await _wait_for_detail_panel_after_click(
+                        page,
+                        block.text,
+                        stale_panel_text=stale_panel_text,
+                        timeout_ms=2500,
+                    )
+                    return _panel_matches_block(
+                        panel_text, block.text, stale_panel_text=stale_panel_text
+                    )
     except Exception:
         return False
     return False
