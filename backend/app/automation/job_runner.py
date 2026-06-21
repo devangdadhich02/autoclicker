@@ -868,10 +868,15 @@ class JobRunner:
             page, block, stale_panel_text=stale_panel_text
         )
         if not clicked:
+            diagnostic_details = await self._capture_indiamart_diagnostics(
+                page,
+                f"verified_click_failed_{pre_fp[:32]}",
+            )
             logger.warning(
                 "Could not open current verified buyer row — skipped before contact extract",
                 job_id=self.job_id,
                 keyword=item.keyword_value,
+                diagnostic=diagnostic_details,
             )
             self._partial_contact_retry_until[pre_fp] = datetime.now(UTC) + timedelta(
                 seconds=_CLICK_FAILURE_RETRY_SECONDS
@@ -885,10 +890,12 @@ class JobRunner:
                     "keyword": item.keyword_value,
                     "lead_fingerprint": lead_fingerprint(block.text, {}),
                     "current_block_preview": block.text[:500],
+                    "diagnostic": diagnostic_details,
                     "reason": "verified row click failed",
                 },
                 job_name=job.name,
                 page_url=leads_url,
+                screenshot_path=diagnostic_details.get("screenshot_path"),
             )
             return
 

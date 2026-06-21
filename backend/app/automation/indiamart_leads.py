@@ -1598,6 +1598,115 @@ async def click_buyer_lead_block(
     title = _lead_title_for_click(block.text)
     if title:
         try:
+            target = await page.evaluate(
+                """(args) => {
+                  const t = args.title.toLowerCase().slice(0, 80);
+                  const address = (args.address || '').toLowerCase();
+                  const addressParts = address.split(',').map(s => s.trim()).filter(Boolean);
+                  const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                  const titleNeedle = norm(t);
+                  const addressNeedles = addressParts.map(norm).filter(Boolean);
+                  const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
+                  const preferredClickText = /contact\\s*buyer|contact\\s*now|view\\s*(?:mobile|number|phone|contact)|show\\s*(?:mobile|number|phone|contact)|get\\s*contact|call\\s*(?:buyer|now)|phone|mobile|whatsapp|i\\s*am\\s*interested/i;
+                  const clickableSelector = 'a, button, [role="button"], [role="link"], [onclick], [tabindex], [class*="contact"], [class*="mobile"], [class*="phone"], [class*="card"], [class*="lead"], [class*="inq"]';
+                  const visible = (el) => {
+                    const r = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return r.width > 2 && r.height > 2 && style.visibility !== 'hidden' && style.display !== 'none';
+                  };
+                  const nodeMatchesLead = (el) => {
+                    const raw = (el.innerText || '').trim();
+                    if (raw.length < 15 || raw.length > 4200) return false;
+                    const compact = norm(raw);
+                    if (!compact.includes(titleNeedle)) return false;
+                    if (addressNeedles.length && !addressNeedles.every(part => compact.includes(part))) return false;
+                    if (!timeRe.test(raw)) return false;
+                    return visible(el);
+                  };
+                  const preferredTargets = (root) => {
+                    const nodes = root.matches && root.matches(clickableSelector)
+                      ? [root, ...root.querySelectorAll(clickableSelector)]
+                      : [...root.querySelectorAll(clickableSelector)];
+                    const out = [];
+                    for (const el of nodes) {
+                      const text = (el.innerText || el.textContent || '').trim();
+                      if (!text || text.length > 1200 || !visible(el)) continue;
+                      if (preferredClickText.test(text)) out.push(el);
+                    }
+                    out.sort((a, b) => {
+                      const ar = a.getBoundingClientRect();
+                      const br = b.getBoundingClientRect();
+                      return (ar.width * ar.height) - (br.width * br.height);
+                    });
+                    return out;
+                  };
+                  const candidates = [];
+                  for (const el of [...document.querySelectorAll('div, li, article, a, tr, section')]) {
+                    if (!nodeMatchesLead(el)) continue;
+                    const r = el.getBoundingClientRect();
+                    candidates.push({ el, area: r.width * r.height, preferred: preferredTargets(el) });
+                    let parent = el.parentElement;
+                    for (let depth = 0; depth < 10 && parent && parent !== document.body; depth += 1) {
+                      if (!nodeMatchesLead(parent)) break;
+                      const pr = parent.getBoundingClientRect();
+                      const preferred = preferredTargets(parent);
+                      candidates.push({ el: parent, area: pr.width * pr.height, preferred });
+                      if (preferred.length) break;
+                      parent = parent.parentElement;
+                    }
+                  }
+                  candidates.sort((a, b) => {
+                    if (b.preferred.length !== a.preferred.length) return b.preferred.length - a.preferred.length;
+                    return a.area - b.area;
+                  });
+                  if (!candidates.length) return null;
+                  const card = candidates[0].el;
+                  card.scrollIntoView({ block: 'center', inline: 'nearest' });
+                  const targets = candidates[0].preferred.length ? candidates[0].preferred : [card];
+                  const target = targets[0];
+                  target.scrollIntoView({ block: 'center', inline: 'nearest' });
+                  const r = target.getBoundingClientRect();
+                  return {
+                    x: r.left + r.width / 2,
+                    y: r.top + r.height / 2,
+                    text: (target.innerText || target.textContent || '').trim().slice(0, 160),
+                    card_preview: (card.innerText || card.textContent || '').trim().slice(0, 260),
+                    preferred_count: candidates[0].preferred.length,
+                  };
+                }""",
+                {"title": title, "address": _parse_address_from_text(block.text)},
+            )
+            if target and target.get("x") is not None and target.get("y") is not None:
+                await page.mouse.move(float(target["x"]), float(target["y"]))
+                await page.mouse.down()
+                await page.wait_for_timeout(80)
+                await page.mouse.up()
+                await page.wait_for_timeout(1800)
+                panel_text = await _wait_for_detail_panel_after_click(
+                    page,
+                    block.text,
+                    stale_panel_text=stale_panel_text,
+                    timeout_ms=2500,
+                )
+                if _panel_matches_block(
+                    panel_text, block.text, stale_panel_text=stale_panel_text
+                ):
+                    logger.info(
+                        "Native mouse clicked verified lead target text=%r card=%r",
+                        str(target.get("text") or "")[:100],
+                        str(target.get("card_preview") or "")[:160],
+                    )
+                    return True
+                logger.warning(
+                    "Native mouse click target did not open matching panel "
+                    "target_text=%r card_preview=%r panel_preview=%r",
+                    str(target.get("text") or "")[:120],
+                    str(target.get("card_preview") or "")[:180],
+                    panel_text[:180],
+                )
+        except Exception:
+            pass
+        try:
             clicked = await page.evaluate(
                 """(args) => {
                   const t = args.title.toLowerCase().slice(0, 80);
@@ -1629,29 +1738,65 @@ async def click_buyer_lead_block(
                     try { el.click(); } catch (e) {}
                     return true;
                   };
-                  const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
-                  let best = null;
-                  let bestArea = Infinity;
-                  for (const el of nodes) {
+                  const clickableSelector = 'a, button, [role="button"], [role="link"], [onclick], [tabindex], [class*="contact"], [class*="mobile"], [class*="phone"], [class*="card"], [class*="lead"], [class*="inq"]';
+                  const findPreferredTargets = (root) => {
+                    const out = [];
+                    const nodes = root.matches && root.matches(clickableSelector)
+                      ? [root, ...root.querySelectorAll(clickableSelector)]
+                      : [...root.querySelectorAll(clickableSelector)];
+                    for (const el of nodes) {
+                      const text = (el.innerText || el.textContent || '').trim();
+                      if (!text || text.length > 1200) continue;
+                      if (preferredClickText.test(text)) out.push(el);
+                    }
+                    out.sort((a, b) => {
+                      const ar = a.getBoundingClientRect();
+                      const br = b.getBoundingClientRect();
+                      return (ar.width * ar.height) - (br.width * br.height);
+                    });
+                    return out;
+                  };
+                  const nodeMatchesLead = (el) => {
                     const raw = (el.innerText || '').trim();
-                    if (raw.length < 15 || raw.length > 2600) continue;
-                    const low = raw.toLowerCase();
+                    if (raw.length < 15 || raw.length > 3200) return false;
                     const compact = norm(raw);
-                    if (!compact.includes(titleNeedle)) continue;
-                    if (addressNeedles.length && !addressNeedles.every(part => compact.includes(part))) continue;
-                    if (!timeRe.test(raw)) continue;
+                    if (!compact.includes(titleNeedle)) return false;
+                    if (addressNeedles.length && !addressNeedles.every(part => compact.includes(part))) return false;
+                    if (!timeRe.test(raw)) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 2 && r.height > 2;
+                  };
+                  const nodes = [...document.querySelectorAll('div, li, article, a, tr, section')];
+                  const candidates = [];
+                  for (const el of nodes) {
+                    if (!nodeMatchesLead(el)) continue;
                     const r = el.getBoundingClientRect();
                     const area = r.width * r.height;
-                    if (area > 0 && area < bestArea) {
-                      bestArea = area;
-                      best = el;
+                    const preferred = findPreferredTargets(el);
+                    candidates.push({ el, area, preferredCount: preferred.length });
+                    // If the matching text node is smaller than the whole card,
+                    // climb ancestors to find the enclosing card that owns the CTA.
+                    let parent = el.parentElement;
+                    for (let depth = 0; depth < 8 && parent && parent !== document.body; depth += 1) {
+                      if (!nodeMatchesLead(parent)) break;
+                      const pr = parent.getBoundingClientRect();
+                      const pArea = pr.width * pr.height;
+                      const pPreferred = findPreferredTargets(parent);
+                      candidates.push({ el: parent, area: pArea, preferredCount: pPreferred.length });
+                      if (pPreferred.length) break;
+                      parent = parent.parentElement;
                     }
                   }
+                  candidates.sort((a, b) => {
+                    if (b.preferredCount !== a.preferredCount) return b.preferredCount - a.preferredCount;
+                    return a.area - b.area;
+                  });
+                  const best = candidates.length ? candidates[0].el : null;
                   if (best) {
                     best.scrollIntoView({ block: 'center', inline: 'nearest' });
-                    const clickable = [
-                      ...best.querySelectorAll('a, button, [role="button"], [role="link"], [onclick], [tabindex], [class*="contact"], [class*="mobile"], [class*="phone"], [class*="card"], [class*="lead"], [class*="inq"]')
-                    ];
+                    const clickable = best.matches && best.matches(clickableSelector)
+                      ? [best, ...best.querySelectorAll(clickableSelector)]
+                      : [...best.querySelectorAll(clickableSelector)];
                     const preferredTargets = [];
                     const identityTargets = [];
                     for (const el of clickable) {
