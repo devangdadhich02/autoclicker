@@ -1607,8 +1607,10 @@ async def click_buyer_lead_block(
                   const titleNeedle = norm(t);
                   const addressNeedles = addressParts.map(norm).filter(Boolean);
                   const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
+                  const timeGlobalRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/gi;
                   const preferredClickText = /contact\\s*buyer|contact\\s*now|view\\s*(?:mobile|number|phone|contact)|show\\s*(?:mobile|number|phone|contact)|get\\s*contact|call\\s*(?:buyer|now)|phone|mobile|whatsapp|i\\s*am\\s*interested/i;
                   const clickableSelector = 'a, button, [role="button"], [role="link"], [onclick], [tabindex], [class*="contact"], [class*="mobile"], [class*="phone"], [class*="card"], [class*="lead"], [class*="inq"]';
+                  const leadTimeCount = (el) => ((el.innerText || '').match(timeGlobalRe) || []).length;
                   const visible = (el) => {
                     const r = el.getBoundingClientRect();
                     const style = window.getComputedStyle(el);
@@ -1621,9 +1623,13 @@ async def click_buyer_lead_block(
                     if (!compact.includes(titleNeedle)) return false;
                     if (addressNeedles.length && !addressNeedles.every(part => compact.includes(part))) return false;
                     if (!timeRe.test(raw)) return false;
+                    // A parent feed/list can contain the matched title plus a CTA for
+                    // an earlier card. Only click inside one lead-card sized scope.
+                    if (((raw.match(timeGlobalRe) || []).length) > 1) return false;
                     return visible(el);
                   };
                   const preferredTargets = (root) => {
+                    if (leadTimeCount(root) > 1) return [];
                     const nodes = root.matches && root.matches(clickableSelector)
                       ? [root, ...root.querySelectorAll(clickableSelector)]
                       : [...root.querySelectorAll(clickableSelector)];
@@ -1672,6 +1678,7 @@ async def click_buyer_lead_block(
                     text: (target.innerText || target.textContent || '').trim().slice(0, 160),
                     card_preview: (card.innerText || card.textContent || '').trim().slice(0, 260),
                     preferred_count: candidates[0].preferred.length,
+                    time_count: leadTimeCount(card),
                   };
                 }""",
                 {"title": title, "address": _parse_address_from_text(block.text)},
@@ -1699,9 +1706,10 @@ async def click_buyer_lead_block(
                     return True
                 logger.warning(
                     "Native mouse click target did not open matching panel "
-                    "target_text=%r card_preview=%r panel_preview=%r",
+                    "target_text=%r card_preview=%r time_count=%s panel_preview=%r",
                     str(target.get("text") or "")[:120],
                     str(target.get("card_preview") or "")[:180],
+                    target.get("time_count"),
                     panel_text[:180],
                 )
         except Exception:
@@ -1716,6 +1724,7 @@ async def click_buyer_lead_block(
                   const titleNeedle = norm(t);
                   const addressNeedles = addressParts.map(norm).filter(Boolean);
                   const timeRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/i;
+                  const timeGlobalRe = /just\\s+now|\\d+\\s*(?:min|mins|hr|hrs|hour|hours|day|days)\\s*ago/gi;
                   const preferredClickText = /contact\\s*buyer|contact\\s*now|view\\s*(?:mobile|number|phone|contact)|show\\s*(?:mobile|number|phone|contact)|get\\s*contact|call\\s*(?:buyer|now)|phone|mobile|whatsapp|i\\s*am\\s*interested/i;
                   const dispatchClick = (el) => {
                     el.scrollIntoView({ block: 'center', inline: 'nearest' });
@@ -1739,7 +1748,9 @@ async def click_buyer_lead_block(
                     return true;
                   };
                   const clickableSelector = 'a, button, [role="button"], [role="link"], [onclick], [tabindex], [class*="contact"], [class*="mobile"], [class*="phone"], [class*="card"], [class*="lead"], [class*="inq"]';
+                  const leadTimeCount = (el) => ((el.innerText || '').match(timeGlobalRe) || []).length;
                   const findPreferredTargets = (root) => {
+                    if (leadTimeCount(root) > 1) return [];
                     const out = [];
                     const nodes = root.matches && root.matches(clickableSelector)
                       ? [root, ...root.querySelectorAll(clickableSelector)]
@@ -1763,6 +1774,7 @@ async def click_buyer_lead_block(
                     if (!compact.includes(titleNeedle)) return false;
                     if (addressNeedles.length && !addressNeedles.every(part => compact.includes(part))) return false;
                     if (!timeRe.test(raw)) return false;
+                    if (((raw.match(timeGlobalRe) || []).length) > 1) return false;
                     const r = el.getBoundingClientRect();
                     return r.width > 2 && r.height > 2;
                   };
