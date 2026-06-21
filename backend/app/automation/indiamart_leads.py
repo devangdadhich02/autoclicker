@@ -1878,6 +1878,20 @@ async def click_buyer_lead_block(
 async def _read_detail_panel_text(page: Page) -> str:
     panel_text = ""
     for sel in (
+        "[role='dialog']",
+        "[aria-modal='true']",
+        "[class*='modal']",
+        "[class*='Modal']",
+        "[class*='popup']",
+        "[class*='Popup']",
+        "[class*='overlay']",
+        "[class*='Overlay']",
+        "[class*='drawer']",
+        "[class*='Drawer']",
+        "[class*='contact-detail']",
+        "[class*='contactDetail']",
+        "[class*='buyer-info']",
+        "[class*='buyerInfo']",
         ".inqry-detail-panel",
         ".inquiry-detail",
         ".byr-detail",
@@ -1895,6 +1909,38 @@ async def _read_detail_panel_text(page: Page) -> str:
                     return panel_text
         except Exception:
             continue
+    try:
+        modal_text = await page.evaluate(
+            """() => {
+              const visible = (el) => {
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                return r.width > 20 && r.height > 20 &&
+                  s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity || 1) > 0;
+              };
+              const signal = /contact|buyer|mobile|phone|email|whatsapp|view number|contact buyer|hi\\s+[a-z]/i;
+              const roots = [...document.querySelectorAll(
+                '[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="Modal"],' +
+                '[class*="popup"],[class*="Popup"],[class*="overlay"],[class*="Overlay"],' +
+                '[class*="drawer"],[class*="Drawer"],[class*="contact"],[class*="buyer"],aside'
+              )];
+              const candidates = [];
+              for (const el of roots) {
+                if (!visible(el)) continue;
+                const text = (el.innerText || '').trim();
+                if (text.length < 40 || text.length > 5000 || !signal.test(text)) continue;
+                const r = el.getBoundingClientRect();
+                const z = Number.parseInt(window.getComputedStyle(el).zIndex || '0', 10) || 0;
+                candidates.push({ text, area: r.width * r.height, z });
+              }
+              candidates.sort((a, b) => (b.z - a.z) || (a.area - b.area));
+              return candidates.length ? candidates[0].text : '';
+            }"""
+        )
+        if modal_text and len(str(modal_text)) > 40:
+            return str(modal_text)
+    except Exception:
+        pass
     try:
         return await page.evaluate("() => document.body.innerText || ''")
     except Exception:
